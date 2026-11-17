@@ -7,7 +7,16 @@ Roteiro para provar, de ponta a ponta, que a feature funciona. Contratos: [contr
 - Node.js ≥ 24 e npm ≥ 11 (`node --version`, `npm --version`)
 - Git ≥ 2.40 (`git --version`)
 - Claude Code instalado e logado com a assinatura. Verificação: `claude -p "responda apenas: ok" --output-format json` deve retornar `"is_error": false`.
-- Um **repositório de teste** limpo, com o Spec Kit instalado (ex.: `specify init` numa pasta nova + `git init` + commit inicial).
+- Um **repositório de teste** limpo, com o Spec Kit instalado (Spec Kit ≥ 1.4: a opção `--ai` virou `--integration`, e sem `--integration claude` uma execução não interativa instala o Copilot):
+
+  ```powershell
+  mkdir C:\temp\repo-teste; cd C:\temp\repo-teste
+  git init
+  specify init --here --integration claude --script ps --non-interactive --force
+  git add -A; git commit -m "inicial"
+  ```
+
+  Confira que `.claude/skills/speckit-specify/SKILL.md` existe.
 
 ## Setup
 
@@ -36,7 +45,7 @@ Desenvolvimento: `npm run dev -w apps/server` e `npm run dev -w apps/web` (o Vit
 ## Validações manuais (cenários da spec)
 
 1. **US1 ponta a ponta (SC-001, SC-006)**: abra `http://127.0.0.1:4317`, cole o caminho do repositório de teste e confirme que a branch atual aparece. Descreva "Adicionar um endpoint /health que retorna ok" e envie. Responda uma vez no Clarify e depois clique em avançar. No Implement, revise a saída e clique em avançar (ou responda, se ele perguntar sobre checklists incompletos). No Specify, a saída não deve terminar com perguntas ao usuário; dúvidas aparecem como `[NEEDS CLARIFICATION]` na spec gerada.
-   **Esperado**: os cinco passos ficam "concluído". `git log --all --oneline` mostra commits só em `orchestrator/...` e/ou na branch criada pelo Specify. `git rev-parse <branch de origem>` é igual ao valor anterior ao envio, e a tela informa a branch final.
+   **Esperado**: os cinco passos ficam "concluído". `git log --all --oneline` mostra commits só em `orchestrator/...` (com o Spec Kit 1.4.1 sem a extensão de git, o Specify não cria branch; com ela, também na branch criada pelo Specify). A spec fica em `specs/<NNN>-<slug>/spec.md` e `.specify/feature.json` aponta para essa pasta. Na saída do Specify, a linha de sistema inicial informa o modelo do passo. No Clarify, depois de cada resposta, o consumo do passo cresce só com o custo da nova invocação; o custo da sessão anterior não é somado de novo. `git rev-parse <branch de origem>` é igual ao valor anterior ao envio, e a tela informa a branch final.
 2. **US2 tempo real (SC-003/SC-004)**: durante o Plan, abra a saída do passo. O texto deve aparecer incrementalmente, sem esperar o fim do passo.
 3. **US3 interromper (SC-005)**: inicie uma nova execução e clique em interromper durante o Plan.
    **Esperado**: em ≤ 5 s o passo fica "interrompido" e não restam processos `claude` (`Get-Process claude` vazio). Se havia alterações, existe um commit "WIP: passo Plan interrompido", e `git status` mostra a árvore limpa.

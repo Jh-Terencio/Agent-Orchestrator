@@ -115,10 +115,10 @@ O usuário abre o histórico e vê a lista de execuções anteriores, da mais re
 - **Pasta selecionada não é um repositório Git**: o sistema recusa a execução antes de iniciar qualquer passo e explica o motivo.
 - **Repositório com alterações não commitadas**: o sistema recusa iniciar a execução e informa o usuário, para evitar misturar trabalho local em andamento com o trabalho dos agentes.
 - **Branch da execução não pode ser criada** (ex.: nome já existe, repositório em estado de merge/rebase): o sistema recusa a execução e informa o motivo; nenhum passo é iniciado.
-- **Passo cria uma branch nova e troca para ela** (ex.: Specify do Spec Kit): permitido; a nova branch passa a fazer parte da execução e recebe os commits seguintes.
+- **Passo cria uma branch nova e troca para ela** (ex.: Specify do Spec Kit com a extensão de git; sem ela, o Specify não cria branch e trabalha na branch da execução): permitido; a nova branch passa a fazer parte da execução e recebe os commits seguintes.
 - **Passo termina com o repositório em uma branch pré-existente** (ex.: volta para a branch de origem): o passo é marcado como "com erro", nada é commitado e a esteira para.
 - **Campo de descrição vazio**: o botão de enviar não dispara a execução e o usuário é avisado.
-- **Passo que referencia uma skill ou comando inexistente no repositório/ambiente**: o passo falha com mensagem clara e a esteira para.
+- **Passo que referencia uma skill ou comando inexistente no repositório**: o passo falha com mensagem clara e a esteira para. Skills pessoais do usuário, instaladas fora do repositório, não contam (ver Assumptions).
 - **Passo que termina sem erro mas sem produzir o artefato esperado**: o passo seguinte roda normalmente; se ele falhar por falta do artefato, a falha é exibida nesse passo.
 - **Passo interativo aguardando resposta por tempo indefinido**: a pausa não expira e não conta para o limite de tempo; a execução permanece em "aguardando resposta" até o usuário responder, avançar ou interromper, e cada resposta devolve ao agente o limite completo para processá-la (FR-018a).
 - **Interrupção durante "aguardando resposta"**: o passo é marcado como "interrompido", as alterações já feitas pelo passo são commitadas como parciais na branch ativa da execução (FR-010a), e nenhum passo seguinte é iniciado.
@@ -216,7 +216,8 @@ O usuário abre o histórico e vê a lista de execuções anteriores, da mais re
 
 - O usuário é único e usa a aplicação apenas na própria máquina; não há autenticação, contas nem hospedagem (constituição, Princípio I).
 - A ferramenta de agente de IA que executa os passos já está instalada e autenticada na máquina do usuário, usando a assinatura dele; o orquestrador não gerencia credenciais.
-- As skills/comandos referenciados pelos passos (ex.: os do Spec Kit) já estão disponíveis no repositório alvo ou no ambiente do agente; o orquestrador não os instala.
+- As skills/comandos referenciados pelos passos (ex.: os do Spec Kit) já estão instalados no repositório alvo; o orquestrador não os instala. Para que o resultado dependa só do repositório e da esteira, as execuções não carregam as configurações, skills, plugins, hooks e integrações pessoais do usuário na ferramenta de agente.
+- O consumo registrado para cada invocação do agente é o dessa invocação. Quando a ferramenta reporta valores acumulados na sessão (ex.: ao continuar a sessão de um passo interativo), o sistema registra só a parte nova, para que os totais não contem o mesmo consumo duas vezes.
 - Os modelos de IA disponíveis para escolha em cada passo são os oferecidos pela ferramenta de agente instalada.
 - A descrição da feature é entregue como entrada ao primeiro passo; os passos seguintes obtêm o contexto a partir dos artefatos no repositório (como o Spec Kit já faz), e não do texto de saída dos passos anteriores.
 - A branch inicial da execução é criada pelo orquestrador a partir da branch atualmente em uso no repositório alvo; passos podem criar outras branches a partir dela.

@@ -84,9 +84,9 @@ Opus fica só no Plan, onde o raciocínio pesa mais, e Sonnet nos demais passos,
 | `durationMs` | number \| null | soma do tempo de trabalho do agente (exclui a pausa) |
 | `usage` | `Usage \| null` | soma das `invocations[].usage` |
 
-**Invocation**: `{ prompt: string, startedAt, finishedAt, durationMs, outcome: "success" | "error" | "interrupted", usage: Usage | null }`. `prompt` é o texto exato enviado ao agente nessa invocação (comando + descrição na inicial, a resposta do usuário nas seguintes), registrado como a **entrada** do passo (FR-016, Princípio VI).
+**Invocation**: `{ prompt: string, startedAt, finishedAt, durationMs, outcome: "success" | "error" | "interrupted", usage: Usage | null, sessionCostUsd: number | null }`. `prompt` é o texto exato enviado ao agente nessa invocação (comando + descrição na inicial, a resposta do usuário nas seguintes), registrado como a **entrada** do passo (FR-016, Princípio VI). `sessionCostUsd` é o `total_cost_usd` bruto do `result`, **acumulado na sessão** (research R1). Ele não é exibido nem somado: serve só de base (`priorSessionCostUsd`) para calcular o custo da próxima invocação da mesma sessão quando a CLI não reportar `model_usage_since_last_result`. Fica `null` quando a invocação não emitiu `result`.
 
-**Usage** (do evento `result` da CLI): `{ inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUsd: number | null, numTurns }`. Todos os campos são opcionais e ficam nulos quando não são reportados ("quando disponível", FR-016).
+**Usage** (do evento `result` da CLI, **sempre desta invocação**): `{ inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUsd: number | null, numTurns }`. Os tokens e `numTurns` vêm de `usage`/`num_turns`, que já são da invocação. `costUsd` é o custo da invocação calculado pela regra de research R1 (não o `total_cost_usd` acumulado). Todos os campos são opcionais e ficam nulos quando não são reportados ("quando disponível", FR-016). Como cada `Invocation.usage` é só daquela invocação, a soma em `StepRun.usage` e em `RunTotals` não conta custo duas vezes.
 
 ## 4a. Totais da execução (derivados, não persistidos; FR-017a)
 
@@ -140,7 +140,7 @@ Implementação pura em `apps/server/src/execution/state-machine.ts`:
 | running | `agent_error` | failed | verificação de refs; commit WIP "com erro" se ela passar |
 | running | `ref_violation` | failed | **nenhum commit**; a mensagem lista as refs afetadas (branch ativa pré-existente, branch pré-existente alterada/removida, ref remota ou tag criada/removida/alterada) |
 | running | `interrupt` / `timeout` / `shutdown` | interrupted | encerra a árvore de processos (R5); verificação de refs; commit WIP "interrompido" se ela passar. Se falhar: **continua `interrupted`**, nenhum commit, violação em `errorMessage` |
-| awaiting_input | `reply` | running | `--resume <sessionId>` com a resposta |
+| awaiting_input | `reply` | running | `--resume <sessionId>` com a resposta; `priorSessionCostUsd` = `sessionCostUsd` da última `Invocation` do passo |
 | awaiting_input | `advance` | completed | verificação de refs (passou), commit "concluído" |
 | awaiting_input | `ref_violation` (verificação ao avançar falhou) | failed | **nenhum commit**; mensagem lista as refs afetadas |
 | awaiting_input | `interrupt` / `shutdown` | interrupted | verificação de refs; commit WIP se ela passar. Se falhar: continua `interrupted`, nenhum commit, violação em `errorMessage` |

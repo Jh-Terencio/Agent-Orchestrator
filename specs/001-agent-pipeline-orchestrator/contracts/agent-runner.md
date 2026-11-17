@@ -11,14 +11,17 @@ export interface AgentInvocation {
   sessionId: string;        // uuid; nova sessão na 1ª chamada
   resume: boolean;          // true → continua sessionId (resposta de passo interativo)
   interactive: boolean;     // false → instrui o agente a não fazer perguntas (FR-006a)
+  priorSessionCostUsd: number | null; // total_cost_usd bruto da invocação anterior da mesma sessão; 0 quando resume = false; null se desconhecido (research R1)
   signal: AbortSignal;      // AbortController do executor; reason = "user" | "timeout" | "server_shutdown"
   onOutput: (entry: Omit<OutputEntry, "seq" | "at">) => void;
 }
 
+// usage.costUsd é o custo desta invocação (não o acumulado da sessão).
+// sessionCostUsd é o total_cost_usd bruto do result (acumulado na sessão), guardado para calcular a próxima diferença.
 export type AgentOutcome =
-  | { kind: "success"; usage: Usage | null; durationMs: number }
-  | { kind: "error"; message: string; usage: Usage | null; durationMs: number }
-  | { kind: "interrupted"; usage: Usage | null; durationMs: number };
+  | { kind: "success"; usage: Usage | null; sessionCostUsd: number | null; durationMs: number }
+  | { kind: "error"; message: string; usage: Usage | null; sessionCostUsd: number | null; durationMs: number }
+  | { kind: "interrupted"; usage: Usage | null; sessionCostUsd: number | null; durationMs: number };
 
 export interface AgentRunner {
   run(invocation: AgentInvocation): Promise<AgentOutcome>; // nunca rejeita; erros viram { kind: "error" }
@@ -53,23 +56,28 @@ O `error` resolvido vira `kind: "error"` sem iniciar processo.
   --model <model>
   (--session-id <sessionId> | --resume <sessionId>)
   --permission-mode acceptEdits
+  --setting-sources project,local --strict-mcp-config   # sempre; isola a configuração pessoal (research R3a)
   --allowedTools ... --disallowedTools ...      # constante em agent/permissions.ts (research R3)
   [--append-system-prompt <NON_INTERACTIVE_SYSTEM_PROMPT>]   # só quando interactive = false (research R2a)
 cwd = invocation.cwd ; stdin = ignore ; detached = (plataforma ≠ win32)
 ```
 
+**Decodificação**: stdout e stderr são lidos como `Buffer` e decodificados por um `StringDecoder("utf8")` antes de separar as linhas, para que um caractere multibyte dividido entre dois chunks não seja corrompido (research R10). As linhas são separadas por `\n`, com `\r` final removido; uma linha incompleta fica no buffer até o chunk seguinte (ou até o fim do stream).
+
 O limite de tempo **não** é responsabilidade do runner. O executor cria um `AbortController` por invocação e agenda `setTimeout(() => controller.abort("timeout"), ms)` (research R4). Isso mantém o tempo controlável por *fake timers* do Vitest. O runner só reage ao `signal`.
 
 | Linha stream-json | Ação |
 |---|---|
-| `stream_event` com delta de texto | `onOutput({ kind: "text", text })` |
-| `assistant` com `tool_use` | `onOutput({ kind: "tool_use", text: "<Ferramenta>: <resumo>" })` |
+| `stream_event` com `content_block_delta`/`text_delta` | `onOutput({ kind: "text", text })` |
+| `assistant` com `tool_use` | `onOutput({ kind: "tool_use", text: "<Ferramenta>: <resumo>" })`; blocos `text` do `assistant` são ignorados (já vieram pelos deltas) |
 | `user` com `tool_result` | `onOutput({ kind: "tool_result", text })` |
-| `system` (init) | `onOutput({ kind: "system", text: "modelo X, sessão Y" })` |
-| `result` | define o resultado: `is_error` → `error` (mensagem = `result`/`subtype`), senão `success`; `usage` + `total_cost_usd` → `Usage` |
+| `system` com `subtype: "init"` | `onOutput({ kind: "system", text: "modelo X, sessão Y" })` |
+| `result` | define o resultado: `is_error` → `error` (mensagem = `result`/`subtype`), senão `success`. `Usage` = tokens de `usage` (da invocação) + `num_turns` + `costUsd` calculado pela regra de research R1: soma de `model_usage_since_last_result[*].costUSD`; na falta dele, `total_cost_usd − priorSessionCostUsd`; `null` se `priorSessionCostUsd` for `null`. `sessionCostUsd` = `total_cost_usd` bruto |
+| tipo ignorado: `rate_limit_event`, `system` com outro `subtype` (`status`, `hook_started`, `hook_response`, `hook_progress`...), `stream_event` sem `text_delta` (`input_json_delta`, `message_start`...), qualquer `type` desconhecido | nenhuma ação, sem lançar |
+| linha não JSON | ignorada, sem lançar |
 | saída ≠ 0 sem `result` | `error` com as últimas linhas de stderr |
 | `ENOENT` no spawn | `error` "Claude Code não encontrado..." |
 
 ## `FakeAgentRunner` (testes)
 
-Roteiro programável por chamada: emite N `onOutput`, executa um `sideEffect?: (cwd: string) => Promise<void>` opcional (para simular o trabalho do agente no repositório: escrever arquivos, `git switch -c`, trocar para uma branch pré-existente, criar tag), espera um atraso (com *fake timers*) e resolve com o resultado configurado. O `sideEffect` roda antes de resolver e também quando a chamada é interrompida (simula alterações parciais). Respeita `signal` e registra as invocações recebidas para asserções (modelo, `resume`, `interactive`, `sessionId`, prompt).
+Roteiro programável por chamada: emite N `onOutput`, executa um `sideEffect?: (cwd: string) => Promise<void>` opcional (para simular o trabalho do agente no repositório: escrever arquivos, `git switch -c`, trocar para uma branch pré-existente, criar tag), espera um atraso (com *fake timers*) e resolve com o resultado configurado. O `sideEffect` roda antes de resolver e também quando a chamada é interrompida (simula alterações parciais). Respeita `signal` e registra as invocações recebidas para asserções (modelo, `resume`, `interactive`, `sessionId`, `priorSessionCostUsd`, prompt). O resultado configurado pode incluir `sessionCostUsd`.
