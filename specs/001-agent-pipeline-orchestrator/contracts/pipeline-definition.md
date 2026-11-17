@@ -15,14 +15,17 @@ Campos e regras: [data-model.md §1–2](../data-model.md).
   "createdAt": "2026-11-17T00:00:00.000Z",
   "updatedAt": "2026-11-17T00:00:00.000Z",
   "steps": [
-    { "id": "…", "name": "Specify",   "model": "opus",   "command": "/speckit-specify",   "interactive": false },
-    { "id": "…", "name": "Clarify",   "model": "opus",   "command": "/speckit-clarify",   "interactive": true  },
+    { "id": "…", "name": "Specify",   "model": "sonnet", "command": "/speckit-specify",   "interactive": false },
+    { "id": "…", "name": "Clarify",   "model": "sonnet", "command": "/speckit-clarify",   "interactive": true  },
     { "id": "…", "name": "Plan",      "model": "opus",   "command": "/speckit-plan",      "interactive": false },
     { "id": "…", "name": "Tasks",     "model": "sonnet", "command": "/speckit-tasks",     "interactive": false },
-    { "id": "…", "name": "Implement", "model": "opus",   "command": "/speckit-implement", "interactive": false, "timeoutMinutes": 120 }
+    { "id": "…", "name": "Implement", "model": "sonnet", "command": "/speckit-implement", "interactive": true,  "timeoutMinutes": 120 }
   ]
 }
 ```
+
+- **Modelos**: Opus só no Plan, onde o raciocínio mais pesa, e Sonnet nos demais passos, para poupar os limites da assinatura (Princípio VIII). Os modelos são editáveis por passo.
+- **Interativos**: Clarify (perguntas de esclarecimento) e Implement (confirmação de checklists incompletos e revisão antes do commit final). Passos não interativos recebem a instrução de não fazer perguntas (FR-006a).
 
 ## Mensagens de validação esperadas (exemplos)
 

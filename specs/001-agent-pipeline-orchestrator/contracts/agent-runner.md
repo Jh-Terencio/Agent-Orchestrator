@@ -10,7 +10,8 @@ export interface AgentInvocation {
   model: string;            // alias ou id completo
   sessionId: string;        // uuid; nova sessão na 1ª chamada
   resume: boolean;          // true → continua sessionId (resposta de passo interativo)
-  signal: AbortSignal;      // interromper / timeout / shutdown
+  interactive: boolean;     // false → instrui o agente a não fazer perguntas (FR-006a)
+  signal: AbortSignal;      // AbortController do executor; reason = "user" | "timeout" | "server_shutdown"
   onOutput: (entry: Omit<OutputEntry, "seq" | "at">) => void;
 }
 
@@ -39,8 +40,11 @@ claude -p <prompt>
   (--session-id <sessionId> | --resume <sessionId>)
   --permission-mode acceptEdits
   --allowedTools ... --disallowedTools ...      # constante em agent/permissions.ts (research R3)
+  [--append-system-prompt <NON_INTERACTIVE_SYSTEM_PROMPT>]   # só quando interactive = false (research R2a)
 cwd = invocation.cwd ; stdin = ignore ; detached = (plataforma ≠ win32)
 ```
+
+O limite de tempo **não** é responsabilidade do runner. O executor cria um `AbortController` por invocação e agenda `setTimeout(() => controller.abort("timeout"), ms)` (research R4). Isso mantém o tempo controlável por *fake timers* do Vitest. O runner só reage ao `signal`.
 
 | Linha stream-json | Ação |
 |---|---|
@@ -54,4 +58,4 @@ cwd = invocation.cwd ; stdin = ignore ; detached = (plataforma ≠ win32)
 
 ## `FakeAgentRunner` (testes)
 
-Roteiro programável por chamada: emite N `onOutput`, espera um atraso (com *fake timers*) e resolve com o resultado configurado. Respeita `signal` e registra as invocações recebidas para asserções (modelo, `resume`, `sessionId`, prompt).
+Roteiro programável por chamada: emite N `onOutput`, espera um atraso (com *fake timers*) e resolve com o resultado configurado. Respeita `signal` e registra as invocações recebidas para asserções (modelo, `resume`, `interactive`, `sessionId`, prompt).

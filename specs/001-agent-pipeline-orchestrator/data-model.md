@@ -28,18 +28,20 @@ Identificadores são UUID v4 (`crypto.randomUUID()`). Datas são strings ISO-860
 | `name` | string | obrigatório, 1–60 caracteres |
 | `model` | string | obrigatório, não vazio; alias (`opus`, `sonnet`, `haiku`) ou id completo do modelo |
 | `command` | string | obrigatório, não vazio (ex.: `/speckit-plan`); é o início do prompt enviado ao agente |
-| `interactive` | boolean | padrão `false` (FR-009) |
+| `interactive` | boolean | padrão `false` (FR-009). Quando `false`, o agente recebe a instrução de não fazer perguntas (FR-006a, research R2a) |
 | `timeoutMinutes` | inteiro | opcional; 1–1440; quando ausente, **30** (FR-018a) |
 
 ### Esteira padrão (FR-020)
 
 | # | name | command | model | interactive | timeoutMinutes |
 |---|---|---|---|---|---|
-| 1 | Specify | `/speckit-specify` | `opus` | false | — (30) |
-| 2 | Clarify | `/speckit-clarify` | `opus` | **true** | — (30) |
-| 3 | Plan | `/speckit-plan` | `opus` | false | — (30) |
+| 1 | Specify | `/speckit-specify` | `sonnet` | false | — (30) |
+| 2 | Clarify | `/speckit-clarify` | `sonnet` | **true** | — (30) |
+| 3 | Plan | `/speckit-plan` | **`opus`** | false | — (30) |
 | 4 | Tasks | `/speckit-tasks` | `sonnet` | false | — (30) |
-| 5 | Implement | `/speckit-implement` | `opus` | false | **120** |
+| 5 | Implement | `/speckit-implement` | `sonnet` | **true** | **120** |
+
+Opus fica só no Plan, onde o raciocínio pesa mais, e Sonnet nos demais passos, para reduzir o consumo dos limites da assinatura (Princípio VIII). Os modelos continuam editáveis por passo. O Implement é interativo (research R2a): permite confirmar checklists incompletos e revisar antes do commit final.
 
 ---
 
@@ -53,7 +55,7 @@ Identificadores são UUID v4 (`crypto.randomUUID()`). Datas são strings ISO-860
 | `repoPath` | string | caminho absoluto normalizado (`git rev-parse --show-toplevel`) |
 | `description` | string | descrição da feature; não pode ser vazia (FR-003) |
 | `sourceBranch` | string | branch em uso no envio (FR-003a / FR-004) |
-| `preexistingBranches` | `{ name: string; sha: string }[]` | snapshot inicial (FR-011a, R3) |
+| `refSnapshot` | `{ ref: string; sha: string }[]` | snapshot inicial de `refs/heads`, `refs/remotes` e `refs/tags`, com nomes completos (ex.: `refs/heads/main`, `refs/tags/v1.0`) (FR-011a, R3). As branches pré-existentes são as entradas `refs/heads/*` |
 | `initialBranch` | string | branch criada pelo orquestrador (`orchestrator/...`) |
 | `createdBranches` | string[] | `initialBranch` mais as branches novas detectadas ao fim de cada passo, na ordem em que aparecem |
 | `finalBranch` | string \| null | branch ativa ao término (FR-017) |
@@ -114,7 +116,7 @@ Implementação pura em `apps/server/src/execution/state-machine.ts`:
  waiting ─────────► running ─────────────────────────────► awaiting_input
                      │  │  agent_success (não interativo)        │   │
                      │  └───────────────────► completed ◄────────┘   │ advance
-                     │ agent_error / branch_violation                │
+                     │ agent_error / ref_violation                   │
                      ├──────────────────────► failed                 │
                      │ interrupt / timeout / shutdown                │
                      └──────────────────────► interrupted ◄──────────┘ interrupt / shutdown
@@ -124,16 +126,21 @@ Implementação pura em `apps/server/src/execution/state-machine.ts`:
 | De | Evento | Para | Efeitos colaterais (executor) |
 |---|---|---|---|
 | waiting | `start` | running | gera `sessionId`; pré-verifica o comando (R2); inicia o agente com timeout |
-| running | `agent_success` + não interativo | completed | verificação de branch (FR-011a), commit "concluído" |
-| running | `agent_success` + interativo | awaiting_input | nenhum commit (FR-009a) |
-| running | `agent_error` | failed | verificação de branch; commit WIP "com erro" se a branch for permitida |
-| running | `branch_violation` | failed | **nenhum commit**; mensagem identifica a branch pré-existente |
+| running | `agent_success` + não interativo | completed | verificação de refs (FR-011a), commit "concluído" |
+| running | `agent_success` + interativo | awaiting_input | verificação de refs; nenhum commit (FR-009a) |
+| running | `agent_error` | failed | verificação de refs; commit WIP "com erro" se ela passar |
+| running | `ref_violation` | failed | **nenhum commit**; a mensagem lista as refs afetadas (branch ativa pré-existente, branch pré-existente alterada/removida, ref remota ou tag criada/removida/alterada) |
 | running | `interrupt` / `timeout` / `shutdown` | interrupted | encerra a árvore de processos (R5); commit WIP "interrompido" |
 | awaiting_input | `reply` | running | `--resume <sessionId>` com a resposta |
-| awaiting_input | `advance` | completed | verificação de branch, commit "concluído" |
+| awaiting_input | `advance` | completed | verificação de refs, commit "concluído" |
 | awaiting_input | `interrupt` / `shutdown` | interrupted | commit WIP (edge case da spec) |
 
-A verificação de branch acontece **sempre** que um passo sai de `running` (inclusive em erro ou interrupção). Ela compara a branch ativa com `preexistingBranches` e verifica se algum SHA pré-existente mudou. Se a verificação falhar, o resultado vira `failed` com `branch_violation` e nada é commitado.
+A verificação de refs acontece **sempre** que um passo sai de `running` (inclusive em erro ou interrupção) e de novo antes do commit ao avançar. Ela compara o estado atual com `refSnapshot`:
+
+- `refs/heads`: a branch ativa não pode ser pré-existente, e nenhuma branch pré-existente pode ter mudado de SHA ou sumido. Branches novas são permitidas e entram em `createdBranches`.
+- `refs/remotes` e `refs/tags`: qualquer ref criada, removida ou alterada é violação.
+
+Se a verificação falhar, o resultado vira `failed` com `ref_violation` e nada é commitado.
 
 ### RunStatus
 

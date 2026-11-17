@@ -125,7 +125,8 @@ O usuário abre o histórico e vê a lista de execuções anteriores, da mais re
 - **Passo interrompido ou com erro sem nenhuma alteração**: nenhum commit é criado.
 - **Passo atinge o limite de tempo**: tratado como interrupção do usuário (ver FR-018a); a caixa mostra "interrompido" com o motivo "tempo limite excedido".
 - **Passo interativo aguardando resposta por muito tempo**: a pausa não conta para o limite de tempo; ao receber uma resposta, o agente volta a ter o limite completo para processá-la.
-- **Passo não interativo que faz perguntas ao usuário**: as perguntas aparecem apenas na saída; a esteira não pausa e segue para o próximo passo.
+- **Passo não interativo que precisaria perguntar algo ao usuário** (ex.: Specify com pontos em aberto): o orquestrador avisa o agente de que não há usuário presente, então o agente não deve fazer perguntas nem esperar confirmação, e deve registrar as dúvidas nos artefatos (ex.: marcadores [NEEDS CLARIFICATION], resolvidos depois pelo Clarify) e concluir o trabalho. Se ainda assim o agente fizer perguntas, elas aparecem apenas na saída; a esteira não pausa e segue para o próximo passo (FR-006a).
+- **Agente cria, remove ou altera referências remotas ou tags** (ex.: push, fetch ou criação de tag durante um passo): o passo é marcado como "com erro", nada é commitado e a esteira para (FR-011a).
 - **Aplicação fechada durante uma execução**: a execução é encerrada como numa interrupção do usuário (os processos de agentes são finalizados e as alterações parciais são commitadas conforme FR-010a) e, ao reabrir, ela aparece como interrompida no histórico, com as saídas registradas até aquele ponto.
 - **Tentativa de iniciar uma segunda execução enquanto outra está em andamento**: o sistema não permite; apenas uma execução por vez.
 - **Ferramenta de agente de IA indisponível ou não autenticada na máquina**: o primeiro passo falha com mensagem orientando o usuário a corrigir a configuração.
@@ -146,6 +147,7 @@ O usuário abre o histórico e vê a lista de execuções anteriores, da mais re
 - **FR-004**: Ao enviar, o sistema MUST criar uma branch nova no repositório alvo, a partir da branch atualmente em uso, com nome único e identificável como pertencente à execução, antes de iniciar qualquer passo.
 - **FR-005**: O sistema MUST executar os passos da esteira estritamente em sequência, um de cada vez, na ordem definida.
 - **FR-006**: Cada passo MUST executar sobre o mesmo repositório, na branch ativa da execução (FR-011), com o modelo de IA e a skill/comando configurados para ele; o primeiro passo MUST receber a descrição da feature enviada pelo usuário.
+- **FR-006a**: Em passos não interativos, o sistema MUST informar ao agente que não há usuário presente: o agente não deve fazer perguntas nem aguardar confirmação, e deve registrar dúvidas nos artefatos (ex.: marcadores [NEEDS CLARIFICATION]) e concluir o trabalho.
 - **FR-007**: Cada passo MUST ter acesso aos artefatos produzidos pelos passos anteriores da mesma execução.
 - **FR-008**: Se um passo falhar, o sistema MUST interromper a esteira, marcar o passo como "com erro", exibir a mensagem de erro, commitar as alterações parciais conforme FR-010a e não iniciar os passos seguintes.
 - **FR-009**: A definição da esteira MUST permitir marcar cada passo como interativo. Quando um passo interativo termina, a esteira MUST pausar no estado "aguardando resposta" e exibir a saída do passo. O usuário MUST poder (a) enviar uma resposta, que continua a mesma sessão do agente, quantas vezes quiser, ou (b) avançar a qualquer momento. A pausa MUST NOT expirar, e interromper continua disponível durante ela.
@@ -153,7 +155,7 @@ O usuário abre o histórico e vê a lista de execuções anteriores, da mais re
 - **FR-010**: Ao fim de cada passo concluído, o sistema MUST registrar as alterações como commit na branch ativa naquele momento, desde que ela seja uma branch criada pela execução.
 - **FR-010a**: Quando um passo for interrompido (pelo usuário, por tempo limite ou pelo fechamento da aplicação) ou falhar, o sistema MUST commitar as alterações parciais na branch ativa da execução, com uma mensagem que identifique o passo e deixe claro que o conteúdo é parcial (ex.: "WIP: passo Plan interrompido", "WIP: passo Implement com erro"), deixando o repositório sem alterações pendentes. Se não houver alterações, nenhum commit é criado. Se a branch ativa for pré-existente (FR-011a), nada é commitado.
 - **FR-011**: A branch de origem e todas as branches que já existiam antes da execução MUST NOT ser alteradas (nenhum commit, push, merge, reset ou rebase). Qualquer branch criada durante a execução, pelo orquestrador ou por um passo, faz parte da execução e pode receber commits. O merge é sempre uma ação manual do usuário.
-- **FR-011a**: O sistema MUST registrar quais branches existiam antes da execução e, ao fim de cada passo, verificar a branch ativa; se ela for uma branch pré-existente, o passo MUST ser marcado como "com erro", nada é commitado e a esteira para.
+- **FR-011a**: O sistema MUST registrar, no início da execução, as branches locais, as referências remotas e as tags existentes, com o commit para o qual cada uma aponta. Ao fim de cada passo, o sistema MUST verificar que (a) a branch ativa não é uma branch pré-existente, (b) nenhuma branch pré-existente foi alterada ou removida e (c) nenhuma referência remota ou tag foi criada, removida ou alterada (o que indicaria push, fetch ou tag feitos pelo agente). Se qualquer verificação falhar, o passo MUST ser marcado como "com erro", nada é commitado e a esteira para.
 - **FR-012**: O sistema MUST permitir apenas uma execução ativa por vez.
 
 **Visualização e acompanhamento**
@@ -175,7 +177,7 @@ O usuário abre o histórico e vê a lista de execuções anteriores, da mais re
 
 **Gestão de esteiras**
 
-- **FR-020**: O sistema MUST fornecer, já pronta, uma esteira padrão com os passos Specify, Clarify, Plan, Tasks e Implement, baseada no Spec Kit, com o passo Clarify marcado como interativo e o passo Implement com limite de tempo de 120 minutos.
+- **FR-020**: O sistema MUST fornecer, já pronta, uma esteira padrão com os passos Specify, Clarify, Plan, Tasks e Implement, baseada no Spec Kit, com os passos Clarify e Implement marcados como interativos (o Implement, para permitir confirmações como a de checklists incompletos e oferecer um ponto de revisão antes do commit final) e o passo Implement com limite de tempo de 120 minutos.
 - **FR-021**: Usuários MUST ser capazes de criar, editar (nome, modelo, skill/comando, marcação de interativo e limite de tempo de cada passo), adicionar e remover passos, reordenar passos, salvar, duplicar e excluir esteiras.
 - **FR-022**: Usuários MUST ser capazes de escolher qual esteira salva será usada antes de enviar uma execução.
 - **FR-023**: Cada esteira MUST ser armazenada como uma definição declarativa legível, que é a única fonte da verdade da esteira; a interface MUST apenas visualizar e editar essa definição.
@@ -190,7 +192,7 @@ O usuário abre o histórico e vê a lista de execuções anteriores, da mais re
 
 - **Esteira (Pipeline)**: Sequência nomeada e ordenada de passos. Atributos: nome, lista ordenada de passos, indicador de esteira padrão. É salva como definição declarativa reutilizável.
 - **Passo (Step)**: Unidade da esteira. Atributos: nome, modelo de IA, skill ou comando a executar, posição na esteira, indicador de interativo, limite de tempo (opcional; padrão de 30 minutos).
-- **Execução (Run)**: Uma aplicação de uma esteira a um repositório. Atributos: esteira usada (cópia da definição no momento do envio), repositório alvo, descrição da feature, branch de origem, branches pré-existentes no início, branches criadas durante a execução, branch final do resultado, status geral, horário de início/fim.
+- **Execução (Run)**: Uma aplicação de uma esteira a um repositório. Atributos: esteira usada (cópia da definição no momento do envio), repositório alvo, descrição da feature, branch de origem, referências pré-existentes no início (branches locais, referências remotas e tags), branches criadas durante a execução, branch final do resultado, status geral, horário de início/fim.
 - **Execução de Passo (Step Run)**: Registro de um passo dentro de uma execução. Atributos: passo correspondente, status, saída, respostas enviadas pelo usuário (passos interativos), mensagem de erro, motivo da interrupção (usuário ou tempo limite excedido), duração, consumo reportado.
 - **Repositório Alvo**: Repositório Git local selecionado pelo usuário. Atributos: caminho na máquina, branch atual.
 

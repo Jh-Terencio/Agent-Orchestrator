@@ -44,6 +44,19 @@ Cada item segue o formato **Decisão / Racional / Alternativas consideradas**. T
 
 **Alternativas consideradas**: ler o `SKILL.md` e injetar seu conteúdo no prompt. Rejeitada porque duplica o mecanismo nativo e quebra os scripts relativos da skill.
 
+### R2a. Passos não interativos não podem parar para perguntar (FR-006a)
+
+**Problema**: em `-p`, quando o agente termina o turno com uma pergunta, a CLI emite `result` sem erro. O Specify pode parar esperando respostas a `[NEEDS CLARIFICATION]`, e o Implement pode parar perguntando se deve seguir com checklists incompletos. Nos dois casos o passo seria marcado como "concluído" sem ter terminado o trabalho (falso sucesso).
+
+**Decisão**:
+
+- Em passos **não interativos**, o `ClaudeCliRunner` adiciona `--append-system-prompt` com um texto fixo (constante `NON_INTERACTIVE_SYSTEM_PROMPT` em `agent/system-prompts.ts`). Conteúdo: "Você está rodando sem usuário presente, numa esteira automatizada. Não faça perguntas nem aguarde confirmação. Quando houver dúvida, escolha a opção mais razoável, registre a dúvida nos artefatos (ex.: marcador [NEEDS CLARIFICATION]) e conclua o trabalho do comando." Esse texto é adicionado e não substitui o system prompt padrão do Claude Code, que continua com as ferramentas e as skills.
+- Em passos **interativos** o texto não é adicionado, porque perguntar é o comportamento esperado e a esteira pausa em "aguardando resposta".
+- Na esteira padrão, o **Implement passa a ser interativo** (FR-020). Assim, a confirmação de checklists incompletos do `/speckit-implement` funciona pelo fluxo responder/avançar, e o usuário tem um ponto de revisão antes do commit final (que só acontece ao avançar, FR-009a). O limite de 120 minutos vale para cada invocação (R4).
+- Teste unitário: verifica que os argumentos gerados incluem `--append-system-prompt` se e somente se `interactive === false`.
+
+**Alternativas consideradas**: detectar perguntas na saída por heurística (frágil, com falsos positivos); tornar todos os passos interativos (exigiria intervenção em todo passo e contraria SC-001).
+
 ---
 
 ## R3. Permissões do agente em modo não interativo
@@ -64,7 +77,15 @@ Cada item segue o formato **Decisão / Racional / Alternativas consideradas**. T
 - O agente não faz commits. Commits e validação de branch são do orquestrador (spec FR-010/FR-011a).
 - A lista de regras fica numa constante única (`agent/permissions.ts`) coberta por teste unitário que confere os argumentos gerados.
 
-**Defesa em profundidade (garantia real do Princípio II)**: os padrões de *deny* casam por prefixo de comando e podem ser contornados (ex.: `cd x && git push`, `git -C . reset`). Por isso o `GitService` registra, no início da execução, o **SHA de cada branch pré-existente** e, ao fim de cada passo, verifica (1) se a branch ativa não é pré-existente (FR-011a) e (2) se nenhuma branch pré-existente mudou de SHA nem foi removida. Se alguma das duas verificações falhar, o passo fica "com erro", nada é commitado e a esteira para. O orquestrador nunca faz push.
+**Defesa em profundidade (garantia real do Princípio II)**: os padrões de *deny* casam por prefixo de comando e podem ser contornados (ex.: `cd x && git push`, `git -C . reset`). Por isso o `GitService` registra, no início da execução, um **snapshot de refs** (`refs/heads`, `refs/remotes` e `refs/tags`, cada ref com seu SHA) e, ao fim de cada passo, verifica (FR-011a):
+
+1. a branch ativa não é uma branch pré-existente;
+2. nenhuma ref pré-existente de `refs/heads` mudou de SHA nem foi removida (refs **novas** em `refs/heads` são permitidas: são as branches criadas pela execução);
+3. em `refs/remotes` e `refs/tags`, **nenhuma** ref foi criada, removida ou alterada. Uma mudança ali indica push (que atualiza as refs de rastreamento), fetch ou tag feitos pelo agente.
+
+Se qualquer verificação falhar, o passo fica "com erro" com uma mensagem que lista as refs afetadas, nada é commitado e a esteira para. O orquestrador nunca faz push nem fetch, e seus próprios commits só movem branches criadas pela execução, por isso não disparam a verificação.
+
+**Risco conhecido**: versões antigas do script `create-new-feature` do Spec Kit rodavam `git fetch --all --prune` para numerar features, o que faria o Specify falhar nessa verificação. A versão instalada neste repositório não faz fetch. Se o repositório alvo usar uma versão antiga, a mensagem de erro aponta a ref remota alterada, e a correção é atualizar o Spec Kit no alvo.
 
 **Alternativas consideradas**: `bypassPermissions` + *deny* (permissivo demais); hook `PreToolUse` customizado no repositório alvo (escreveria arquivos no alvo, o que é proibido pelo requisito de não sujar a árvore de trabalho); sandbox de SO (complexo demais para v1).
 
@@ -72,7 +93,7 @@ Cada item segue o formato **Decisão / Racional / Alternativas consideradas**. T
 
 ## R4. Limite de tempo (FR-018a)
 
-**Decisão**: o timer é por **invocação do agente**, não por passo. Cada chamada de `AgentRunner.run()` (execução inicial e cada resposta) recebe um `AbortSignal` com `timeoutMinutes` do passo (padrão 30, Implement 120). A pausa em "aguardando resposta" não tem processo vivo e por isso não conta. Quando o limite estoura, o passo é encerrado pelo mesmo caminho do "interromper" (R5), com `interruptReason = "timeout"`.
+**Decisão**: o timer é por **invocação do agente**, não por passo. Para cada chamada de `AgentRunner.run()` (execução inicial e cada resposta), o executor cria um `AbortController` e agenda `setTimeout(() => controller.abort("timeout"), timeoutMinutes × 60 000)`, com `timeoutMinutes` do passo (padrão 30, Implement 120). O mesmo controller é abortado com `"user"` ou `"server_shutdown"` no interromper ou no encerramento do servidor, e `signal.reason` define o `interruptReason`. O `clearTimeout` acontece quando a invocação termina. Não usar `AbortSignal.timeout`: ele usa um timer interno que os *fake timers* do Vitest (`vi.useFakeTimers()` / `vi.advanceTimersByTime`) não controlam, e `setTimeout` permite testar o limite sem esperar tempo real. A pausa em "aguardando resposta" não tem processo vivo e por isso não conta. Quando o limite estoura, o passo é encerrado pelo mesmo caminho do "interromper" (R5), com `interruptReason = "timeout"`.
 
 **Alternativas**: `--max-turns` (limita turnos, não tempo); timer global do passo (contaria a pausa e violaria a spec).
 
@@ -101,7 +122,7 @@ Cada item segue o formato **Decisão / Racional / Alternativas consideradas**. T
 | Alterações pendentes? | `git status --porcelain=v1 --untracked-files=all` |
 | Merge/rebase em andamento? | existência de `MERGE_HEAD`, `REBASE_HEAD`, `rebase-merge/`, `rebase-apply/`, `CHERRY_PICK_HEAD` em `git rev-parse --git-dir` |
 | Branch atual | `git symbolic-ref --short -q HEAD` (vazio = HEAD destacado → recusa) |
-| Snapshot de branches | `git for-each-ref --format=%(refname:short) %(objectname) refs/heads` |
+| Snapshot de refs | `git for-each-ref --format=%(refname) %(objectname) refs/heads refs/remotes refs/tags` (nome completo, para distinguir os grupos) |
 | Criar branch inicial | `git switch -c <nome>` (falha se já existir) |
 | Commit | `git add -A` e depois `git commit -m <msg>` (pula o commit se o porcelain estiver vazio) |
 

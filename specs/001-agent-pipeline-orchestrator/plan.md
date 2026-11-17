@@ -8,7 +8,7 @@
 
 ## Summary
 
-Aplicação local (servidor Node em `127.0.0.1` + SPA React) que executa, sobre um repositório Git local, uma esteira declarativa de passos de agente de IA (padrão: Specify → Clarify → Plan → Tasks → Implement do Spec Kit). Cada passo roda a **CLI do Claude Code em modo não interativo** (`claude -p --output-format stream-json`) com o login da assinatura, atrás da interface `AgentRunner`. A saída e o status chegam à UI via WebSocket. Um `GitService` centraliza as validações, a criação de branch, a verificação de branches pré-existentes (nome e SHA) e os commits (completos e WIP). O ciclo de vida é uma máquina de estados pura e testável. A persistência usa arquivos JSON numa pasta de dados do orquestrador, fora do repositório alvo. Detalhes e justificativas: [research.md](./research.md).
+Aplicação local (servidor Node em `127.0.0.1` + SPA React) que executa, sobre um repositório Git local, uma esteira declarativa de passos de agente de IA (padrão: Specify → Clarify → Plan → Tasks → Implement do Spec Kit). Cada passo roda a **CLI do Claude Code em modo não interativo** (`claude -p --output-format stream-json`) com o login da assinatura, atrás da interface `AgentRunner`. A saída e o status chegam à UI via WebSocket. Passos não interativos recebem, via `--append-system-prompt`, a instrução de não fazer perguntas e de registrar dúvidas nos artefatos. Na esteira padrão, Clarify e Implement são interativos. Um `GitService` centraliza as validações, a criação de branch, o snapshot e a verificação de refs (`refs/heads`, `refs/remotes`, `refs/tags`) e os commits (completos e WIP). O ciclo de vida é uma máquina de estados pura e testável. A persistência usa arquivos JSON numa pasta de dados do orquestrador, fora do repositório alvo. Detalhes e justificativas: [research.md](./research.md).
 
 ## Technical Context
 
@@ -39,13 +39,13 @@ Nenhum item ficou como NEEDS CLARIFICATION. As decisões em aberto (SDK × CLI, 
 | Princípio | Como o plano atende | Status |
 |---|---|---|
 | **I. Uso Pessoal e Local** | `listen(4317, '127.0.0.1')`; validação de `Origin`/`Host`; sem autenticação, contas ou deploy; dados em pasta local | ✅ |
-| **II. Segurança do Código Alvo** | branch nova `orchestrator/...` antes do 1º passo; snapshot nome+SHA das branches pré-existentes; verificação a cada fim de passo (branch ativa e SHAs) → erro sem commit; agente proibido de `git commit/push/merge/rebase/reset/...` (R3); orquestrador nunca faz push ou merge; validações de FR-002 antes de iniciar | ✅ |
+| **II. Segurança do Código Alvo** | branch nova `orchestrator/...` antes do 1º passo; snapshot (ref + SHA) de `refs/heads`, `refs/remotes` e `refs/tags`; verificação a cada fim de passo (branch ativa, branches pré-existentes, qualquer mudança em remotas/tags) → erro sem commit; agente proibido de `git commit/push/merge/rebase/reset/...` (R3); orquestrador nunca faz push ou merge; validações de FR-002 antes de iniciar | ✅ |
 | **III. Simplicidade Primeiro** | 3 pacotes (exigidos pelo schema compartilhado); sem banco; `git`/`claude` via `execFile`/`spawn` em vez de bibliotecas; dependências justificadas em R7, R9 e R12; `killProcessTree` próprio em vez de `tree-kill` | ✅ |
 | **IV. Pipeline como Dado** | esteira em JSON validado por Zod ao salvar, ler e executar; a UI só edita o JSON; a ordem é a ordem do array; o `Run` guarda uma cópia da definição (reprodutível) | ✅ |
 | **V. Passos Pequenos e Verificáveis** | ordem de construção em 7 incrementos, cada um com testes próprios e sistema funcional (ver abaixo) | ✅ |
 | **VI. Transparência em Tempo Real** | 6 estados visíveis por passo; saída em streaming via WebSocket; entrada, saída, respostas, erros, duração e consumo persistidos e consultáveis no histórico; erros com mensagem acionável | ✅ |
 | **VII. Qualidade e Testes** | `strict` em todos os pacotes; `npm run typecheck` e `npm test` como gate; testes unitários (schema, máquina de estados, executor com fake, parser stream-json, permissões) e de integração (git em repositórios temporários, kill-tree, servidor) | ✅ |
-| **VIII. Custo Consciente** | interromper a qualquer momento (encerra a árvore de processos); limite de tempo por passo; consumo (`usage`, `total_cost_usd`) do evento `result` exibido por passo; nenhuma reexecução automática (FR-019) | ✅ |
+| **VIII. Custo Consciente** | interromper a qualquer momento (encerra a árvore de processos); limite de tempo por passo; esteira padrão usa Opus só no Plan e Sonnet nos demais passos; consumo (`usage`, `total_cost_usd`) do evento `result` exibido por passo; nenhuma reexecução automática (FR-019) | ✅ |
 
 **Resultado do gate (pré-pesquisa)**: aprovado, sem violações.
 **Re-check pós-design (Phase 1)**: aprovado. Os contratos e o modelo de dados não introduziram camadas nem dependências além das listadas. A única abstração (`AgentRunner`) atende a uma necessidade presente: testar o executor sem consumir a assinatura e isolar uma integração externa que pode mudar.
@@ -85,8 +85,8 @@ apps/
 │   ├── src/
 │   │   ├── git/             # git-service.ts, exec-git.ts, branch-name.ts
 │   │   ├── agent/           # agent-runner.ts (interface), claude-cli-runner.ts,
-│   │   │                    # stream-json-parser.ts, permissions.ts, kill-tree.ts,
-│   │   │                    # command-lookup.ts
+│   │   │                    # stream-json-parser.ts, permissions.ts, system-prompts.ts,
+│   │   │                    # kill-tree.ts, command-lookup.ts
 │   │   ├── execution/       # state-machine.ts, pipeline-executor.ts, run-lock.ts
 │   │   ├── storage/         # data-dir.ts, pipeline-store.ts, run-store.ts,
 │   │   │                    # settings-store.ts, atomic-write.ts
@@ -114,8 +114,9 @@ apps/
 
 ## Componentes-chave e responsabilidades
 
-- **`GitService`** (`git/`): `inspect(path)` (FR-002/FR-003a), `snapshotBranches()`, `createRunBranch(desc)` (FR-004), `currentBranch()`, `verifyAfterStep(snapshot)` (FR-011a + SHAs inalterados), `commitAll(message)` (pula se não houver alterações). Única porta de entrada para o `git`.
-- **`AgentRunner` / `ClaudeCliRunner`** (`agent/`): ver [contracts/agent-runner.md](./contracts/agent-runner.md). Timeout via `AbortSignal.timeout(timeoutMinutes)` combinado com o sinal de interrupção (`AbortSignal.any`). O motivo do aborto define `interruptReason`.
+- **`GitService`** (`git/`): `inspect(path)` (FR-002/FR-003a), `snapshotRefs()` (`refs/heads`, `refs/remotes`, `refs/tags`), `createRunBranch(desc)` (FR-004), `currentBranch()`, `verifyAfterStep(snapshot)` (FR-011a: branch ativa, branches pré-existentes inalteradas, nenhuma mudança em remotas/tags; retorna as violações), `commitAll(message)` (pula se não houver alterações). Única porta de entrada para o `git`.
+- **`AgentRunner` / `ClaudeCliRunner`** (`agent/`): ver [contracts/agent-runner.md](./contracts/agent-runner.md). Adiciona `--append-system-prompt` com `NON_INTERACTIVE_SYSTEM_PROMPT` (`agent/system-prompts.ts`) quando o passo não é interativo (FR-006a, research R2a).
+- **Limite de tempo** (`execution/`): por invocação, o executor cria um `AbortController` e agenda `setTimeout(() => controller.abort("timeout"), ms)`, com `clearTimeout` ao fim. Interromper e shutdown abortam o mesmo controller com `"user"`/`"server_shutdown"`, e `signal.reason` define o `interruptReason`. `AbortSignal.timeout` não é usado porque os *fake timers* do Vitest não o controlam (research R4).
 - **`PipelineExecutor`** (`execution/`): orquestra uma execução usando a máquina de estados, o `GitService`, o `AgentRunner`, o `RunStore` e o `EventHub`. Expõe `start`, `reply`, `advance`, `interrupt` e `shutdown`. Uma `RunLock` garante uma execução por vez (FR-012).
 - **Shutdown** (`main.ts`): em `SIGINT`/`SIGTERM`, chama `executor.shutdown()` (interrompe com `server_shutdown`, commit WIP e persistência) e só então fecha o servidor. Na inicialização, runs não terminais são marcados como `interrupted` (R8).
 
@@ -124,9 +125,9 @@ apps/
 | # | Incremento | Critério de verificação |
 |---|---|---|
 | 1 | Workspaces, tsconfig strict, Vitest; schemas Zod e esteira padrão em `shared` | `npm run typecheck`; testes do schema (válidos, inválidos, mensagens) |
-| 2 | `GitService` | testes de integração com repositórios temporários: repo inválido, árvore suja, merge em andamento, HEAD destacado, criação de branch, commit/WIP/sem alterações, detecção de branch pré-existente e SHA alterado |
-| 3 | `ClaudeCliRunner` executando um único passo; `kill-tree`; `permissions`; parser stream-json | testes do parser com fixtures reais gravadas; teste de argumentos; teste de árvore de processos; *smoke test* manual opcional (`RUN_CLAUDE_SMOKE=1`) |
-| 4 | Máquina de estados + `PipelineExecutor` (sequência, interativo, falha, interrupção, timeout, shutdown, lock) + stores | testes unitários com `FakeAgentRunner` e *fake timers*; o timeout não conta a pausa |
+| 2 | `GitService` | testes de integração com repositórios temporários: repo inválido, árvore suja, merge em andamento, HEAD destacado, criação de branch, commit/WIP/sem alterações, detecção de branch pré-existente ativa/alterada/removida, de tag criada/removida e de ref remota alterada (remote local apontando para outro repositório temporário) |
+| 3 | `ClaudeCliRunner` executando um único passo; `kill-tree`; `permissions`; `system-prompts`; parser stream-json | testes do parser com fixtures reais gravadas; teste de argumentos (inclui `--append-system-prompt` se e somente se o passo não for interativo); teste de árvore de processos; *smoke test* manual opcional (`RUN_CLAUDE_SMOKE=1`) |
+| 4 | Máquina de estados + `PipelineExecutor` (sequência, interativo, falha, interrupção, timeout via `setTimeout` + `AbortController`, shutdown, lock) + stores | testes unitários com `FakeAgentRunner` e `vi.useFakeTimers()`; o timeout dispara exatamente no limite e não conta a pausa |
 | 5 | Servidor REST + WebSocket + origin guard + recuperação na inicialização | testes de integração com `fetch`/`ws` contra o servidor em porta efêmera e executor com fake |
 | 6 | UI: seleção de repo, entrada, caixas, saída em tempo real, responder/avançar/interromper | testes de componentes; validação manual da quickstart, itens 1–5 |
 | 7 | Histórico (lista + visualização somente leitura) e editor de esteiras | testes de componentes; quickstart, itens 6–8 |

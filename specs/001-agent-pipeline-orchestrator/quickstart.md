@@ -26,7 +26,7 @@ Desenvolvimento: `npm run dev -w apps/server` e `npm run dev -w apps/web` (o Vit
 | Área | Comando | Prova |
 |---|---|---|
 | Schema da esteira | `npm test -w packages/shared` | definições válidas/inválidas e mensagens (FR-024) |
-| Serviço de git | `npm test -w apps/server -- git` | FR-002, criação de branch, commits WIP, detecção de branch pré-existente e de SHA alterado, em repositórios temporários |
+| Serviço de git | `npm test -w apps/server -- git` | FR-002, criação de branch, commits WIP, detecção de mudanças em refs (branch pré-existente, tags, refs remotas), em repositórios temporários |
 | Máquina de estados | `npm test -w apps/server -- state-machine` | toda transição válida e rejeição das inválidas |
 | Executor | `npm test -w apps/server -- executor` | sequência, passo interativo (responder/avançar), falha, interrupção, timeout que só conta o trabalho do agente, execução única, com `FakeAgentRunner` |
 | Encerramento de árvore | `npm test -w apps/server -- kill-tree` | árvore de processos encerrada em < 5 s (SC-005) |
@@ -35,7 +35,7 @@ Desenvolvimento: `npm run dev -w apps/server` e `npm run dev -w apps/web` (o Vit
 
 ## Validações manuais (cenários da spec)
 
-1. **US1 ponta a ponta (SC-001, SC-006)**: abra `http://127.0.0.1:4317`, cole o caminho do repositório de teste e confirme que a branch atual aparece. Descreva "Adicionar um endpoint /health que retorna ok" e envie. Responda uma vez no Clarify e depois clique em avançar.
+1. **US1 ponta a ponta (SC-001, SC-006)**: abra `http://127.0.0.1:4317`, cole o caminho do repositório de teste e confirme que a branch atual aparece. Descreva "Adicionar um endpoint /health que retorna ok" e envie. Responda uma vez no Clarify e depois clique em avançar. No Implement, revise a saída e clique em avançar (ou responda, se ele perguntar sobre checklists incompletos). No Specify, a saída não deve terminar com perguntas ao usuário; dúvidas aparecem como `[NEEDS CLARIFICATION]` na spec gerada.
    **Esperado**: os cinco passos ficam "concluído". `git log --all --oneline` mostra commits só em `orchestrator/...` e/ou na branch criada pelo Specify. `git rev-parse <branch de origem>` é igual ao valor anterior ao envio, e a tela informa a branch final.
 2. **US2 tempo real (SC-003/SC-004)**: durante o Plan, abra a saída do passo. O texto deve aparecer incrementalmente, sem esperar o fim do passo.
 3. **US3 interromper (SC-005)**: inicie uma nova execução e clique em interromper durante o Plan.
