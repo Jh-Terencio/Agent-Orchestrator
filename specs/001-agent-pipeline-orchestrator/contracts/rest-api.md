@@ -16,7 +16,9 @@ Os tipos referenciados estão em [data-model.md](../data-model.md) e são export
 | 404 | `NOT_FOUND` | esteira ou execução inexistente |
 | 409 | `RUN_ALREADY_ACTIVE` | já existe execução ativa (FR-012) |
 | 409 | `INVALID_STATE` | ação incompatível com o estado atual (ex.: responder num passo que não está `awaiting_input`) |
+| 409 | `BRANCH_CHANGED` | a branch em uso no envio difere de `expectedBranch` (FR-003a); `details.currentBranch` traz a branch atual |
 | 422 | `REPO_REJECTED` | o repositório falhou nas validações de FR-002 ou a branch não pôde ser criada (`details.problems`) |
+| 422 | `PIPELINE_INVALID` | o arquivo da esteira no disco não passa no `PipelineSchema` (`issues` presente) |
 | 403 | `FORBIDDEN_ORIGIN` | origem não local |
 
 ## Repositórios
@@ -30,8 +32,8 @@ Os tipos referenciados estão em [data-model.md](../data-model.md) e são export
 
 | Método e rota | Corpo | Resposta |
 |---|---|---|
-| `GET /pipelines` | — | `200 Pipeline[]` (padrão primeiro, depois por nome) |
-| `GET /pipelines/:id` | — | `200 Pipeline` |
+| `GET /pipelines` | — | `200 Pipeline[]` (padrão primeiro, depois por nome); arquivos inválidos são ignorados com aviso no log |
+| `GET /pipelines/:id` | — | `200 Pipeline`; `422 PIPELINE_INVALID` se o arquivo for inválido |
 | `POST /pipelines` | `PipelineInput` (sem `id`/datas) | `201 Pipeline` |
 | `PUT /pipelines/:id` | `PipelineInput` | `200 Pipeline` |
 | `POST /pipelines/:id/duplicate` | — | `201 Pipeline` (nome: "<nome> (cópia)", `isDefault: false`) |
@@ -43,7 +45,7 @@ Os tipos referenciados estão em [data-model.md](../data-model.md) e são export
 
 | Método e rota | Corpo | Resposta |
 |---|---|---|
-| `POST /runs` | `{ repoPath, pipelineId, description }` | `201 Run`. Revalida o repositório e a branch atual no envio (FR-003a), cria a branch e inicia o 1º passo de forma assíncrona |
+| `POST /runs` | `{ repoPath, pipelineId, description, expectedBranch }` | `201 Run`. Revalida o repositório e compara a branch atual com `expectedBranch` (a exibida na tela; FR-003a) → `409 BRANCH_CHANGED` se diferir, sem criar branch nem ocupar a trava. Depois cria a branch e inicia o 1º passo de forma assíncrona. `422 PIPELINE_INVALID` se a esteira for inválida |
 | `GET /runs` | — | `200 RunSummary[]`, mais recente primeiro (FR-016a) |
 | `GET /runs/active` | — | `200 Run` ou `204` se não houver execução ativa |
 | `GET /runs/:id` | — | `200 Run` |
@@ -52,6 +54,6 @@ Os tipos referenciados estão em [data-model.md](../data-model.md) e são export
 | `POST /runs/:id/advance` | — | `202`; exige o passo atual em `awaiting_input` |
 | `POST /runs/:id/interrupt` | — | `202`; válido em `running`/`awaiting_input` |
 
-`RunSummary` = `{ id, startedAt, repoPath, pipelineName, descriptionPreview (≤ 120 caracteres), status, finalBranch }`.
+`RunSummary` = `{ id, startedAt, repoPath, pipelineName, descriptionPreview (≤ 120 caracteres), status, finalBranch, totalDurationMs: number | null, totalUsage: Usage | null }`. Os totais vêm de `computeRunTotals` (data-model.md §4a) e não são persistidos.
 
 As ações `reply`/`advance`/`interrupt` retornam `202` imediatamente. O resultado chega pelo WebSocket ([websocket-events.md](./websocket-events.md)).

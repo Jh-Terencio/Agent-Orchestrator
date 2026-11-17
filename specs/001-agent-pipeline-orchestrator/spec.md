@@ -103,7 +103,7 @@ O usuário abre o histórico e vê a lista de execuções anteriores, da mais re
 
 **Acceptance Scenarios**:
 
-1. **Given** execuções anteriores registradas, **When** o usuário abre o histórico, **Then** vê a lista ordenada da mais recente para a mais antiga, com data, repositório, nome da esteira, início da descrição, status final e branch do resultado de cada execução.
+1. **Given** execuções anteriores registradas, **When** o usuário abre o histórico, **Then** vê a lista ordenada da mais recente para a mais antiga, com data, repositório, nome da esteira, início da descrição, status final, branch do resultado, duração total e consumo total de cada execução.
 2. **Given** a lista do histórico, **When** o usuário seleciona uma execução, **Then** ela é exibida na visualização de caixas em modo somente leitura, com os dados completos de cada passo.
 3. **Given** uma execução aberta a partir do histórico, **When** o usuário tenta editá-la ou reexecutá-la, **Then** não há essas opções; a visualização é apenas para consulta.
 4. **Given** nenhuma execução registrada, **When** o usuário abre o histórico, **Then** vê uma mensagem indicando que ainda não há execuções.
@@ -120,11 +120,13 @@ O usuário abre o histórico e vê a lista de execuções anteriores, da mais re
 - **Campo de descrição vazio**: o botão de enviar não dispara a execução e o usuário é avisado.
 - **Passo que referencia uma skill ou comando inexistente no repositório/ambiente**: o passo falha com mensagem clara e a esteira para.
 - **Passo que termina sem erro mas sem produzir o artefato esperado**: o passo seguinte roda normalmente; se ele falhar por falta do artefato, a falha é exibida nesse passo.
-- **Passo interativo aguardando resposta por tempo indefinido**: a pausa não expira; a execução permanece em "aguardando resposta" até o usuário responder, avançar ou interromper.
+- **Passo interativo aguardando resposta por tempo indefinido**: a pausa não expira e não conta para o limite de tempo; a execução permanece em "aguardando resposta" até o usuário responder, avançar ou interromper, e cada resposta devolve ao agente o limite completo para processá-la (FR-018a).
 - **Interrupção durante "aguardando resposta"**: o passo é marcado como "interrompido", as alterações já feitas pelo passo são commitadas como parciais na branch ativa da execução (FR-010a), e nenhum passo seguinte é iniciado.
 - **Passo interrompido ou com erro sem nenhuma alteração**: nenhum commit é criado.
 - **Passo atinge o limite de tempo**: tratado como interrupção do usuário (ver FR-018a); a caixa mostra "interrompido" com o motivo "tempo limite excedido".
-- **Passo interativo aguardando resposta por muito tempo**: a pausa não conta para o limite de tempo; ao receber uma resposta, o agente volta a ter o limite completo para processá-la.
+- **Passo interrompido com violação de referências** (ex.: o agente trocou para a branch de origem e o usuário interrompeu): o passo continua "interrompido", nada é commitado e a violação é registrada na mensagem de erro do passo (FR-011a).
+- **Branch de origem mudou entre a seleção e o envio** (ex.: o usuário trocou de branch em outro terminal): o envio é recusado, a tela passa a mostrar a branch atual com um aviso, e o usuário precisa enviar de novo para confirmar (FR-003a).
+- **Violação de referências detectada ao avançar um passo interativo** (ex.: o usuário trocou de branch manualmente durante a pausa): o passo é marcado como "com erro", nada é commitado e a esteira para (FR-011a).
 - **Passo não interativo que precisaria perguntar algo ao usuário** (ex.: Specify com pontos em aberto): o orquestrador avisa o agente de que não há usuário presente, então o agente não deve fazer perguntas nem esperar confirmação, e deve registrar as dúvidas nos artefatos (ex.: marcadores [NEEDS CLARIFICATION], resolvidos depois pelo Clarify) e concluir o trabalho. Se ainda assim o agente fizer perguntas, elas aparecem apenas na saída; a esteira não pausa e segue para o próximo passo (FR-006a).
 - **Agente cria, remove ou altera referências remotas ou tags** (ex.: push, fetch ou criação de tag durante um passo): o passo é marcado como "com erro", nada é commitado e a esteira para (FR-011a).
 - **Aplicação fechada durante uma execução**: a execução é encerrada como numa interrupção do usuário (os processos de agentes são finalizados e as alterações parciais são commitadas conforme FR-010a) e, ao reabrir, ela aparece como interrompida no histórico, com as saídas registradas até aquele ponto.
@@ -140,7 +142,7 @@ O usuário abre o histórico e vê a lista de execuções anteriores, da mais re
 - **FR-001**: Usuários MUST ser capazes de selecionar um repositório local existente na máquina como alvo da execução.
 - **FR-002**: O sistema MUST validar, antes de iniciar a execução, que o alvo é um repositório Git válido, sem alterações não commitadas e sem operação de merge/rebase em andamento.
 - **FR-003**: A tela MUST exibir no topo um campo de texto para a descrição da feature e um botão de enviar; o envio MUST ser bloqueado quando a descrição estiver vazia.
-- **FR-003a**: Após a seleção de um repositório, a tela MUST exibir, antes do envio, o nome da branch atualmente em uso nesse repositório, indicando que a nova execução partirá dela (FR-004); a informação MUST ser atualizada sempre que outro repositório for selecionado e verificada novamente no momento do envio.
+- **FR-003a**: Após a seleção de um repositório, a tela MUST exibir, antes do envio, o nome da branch atualmente em uso nesse repositório, indicando que a nova execução partirá dela (FR-004); a informação MUST ser atualizada sempre que outro repositório for selecionado e verificada novamente no momento do envio. Se, no envio, a branch em uso for diferente da exibida, o sistema MUST recusar o envio, exibir a branch atual com um aviso e exigir que o usuário envie de novo.
 
 **Execução da esteira**
 
@@ -155,7 +157,7 @@ O usuário abre o histórico e vê a lista de execuções anteriores, da mais re
 - **FR-010**: Ao fim de cada passo concluído, o sistema MUST registrar as alterações como commit na branch ativa naquele momento, desde que ela seja uma branch criada pela execução.
 - **FR-010a**: Quando um passo for interrompido (pelo usuário, por tempo limite ou pelo fechamento da aplicação) ou falhar, o sistema MUST commitar as alterações parciais na branch ativa da execução, com uma mensagem que identifique o passo e deixe claro que o conteúdo é parcial (ex.: "WIP: passo Plan interrompido", "WIP: passo Implement com erro"), deixando o repositório sem alterações pendentes. Se não houver alterações, nenhum commit é criado. Se a branch ativa for pré-existente (FR-011a), nada é commitado.
 - **FR-011**: A branch de origem e todas as branches que já existiam antes da execução MUST NOT ser alteradas (nenhum commit, push, merge, reset ou rebase). Qualquer branch criada durante a execução, pelo orquestrador ou por um passo, faz parte da execução e pode receber commits. O merge é sempre uma ação manual do usuário.
-- **FR-011a**: O sistema MUST registrar, no início da execução, as branches locais, as referências remotas e as tags existentes, com o commit para o qual cada uma aponta. Ao fim de cada passo, o sistema MUST verificar que (a) a branch ativa não é uma branch pré-existente, (b) nenhuma branch pré-existente foi alterada ou removida e (c) nenhuma referência remota ou tag foi criada, removida ou alterada (o que indicaria push, fetch ou tag feitos pelo agente). Se qualquer verificação falhar, o passo MUST ser marcado como "com erro", nada é commitado e a esteira para.
+- **FR-011a**: O sistema MUST registrar, no início da execução, as branches locais, as referências remotas e as tags existentes, com o commit para o qual cada uma aponta. Ao fim de cada passo, e de novo antes do commit ao avançar um passo interativo, o sistema MUST verificar que (a) a branch ativa não é uma branch pré-existente, (b) nenhuma branch pré-existente foi alterada ou removida e (c) nenhuma referência remota ou tag foi criada, removida ou alterada (o que indicaria push, fetch ou tag feitos pelo agente). Se qualquer verificação falhar, nada é commitado e a esteira para; o passo MUST ser marcado como "com erro", exceto quando ele estiver sendo interrompido (FR-018/FR-018a ou fechamento da aplicação): nesse caso continua "interrompido" e a violação MUST ser registrada na mensagem de erro do passo.
 - **FR-012**: O sistema MUST permitir apenas uma execução ativa por vez.
 
 **Visualização e acompanhamento**
@@ -163,11 +165,12 @@ O usuário abre o histórico e vê a lista de execuções anteriores, da mais re
 - **FR-013**: A esteira MUST ser exibida como uma sequência de caixas, uma por passo, abaixo do campo de entrada, mostrando nome, modelo e skill/comando de cada passo.
 - **FR-014**: Cada caixa MUST exibir o status atual do passo: aguardando, executando, aguardando resposta (somente passos interativos), concluído, com erro ou interrompido.
 - **FR-015**: Usuários MUST ser capazes de abrir a saída de qualquer passo; a saída de um passo em execução MUST ser atualizada em tempo real conforme é produzida.
-- **FR-016**: O sistema MUST registrar entrada, saída, erros, duração e consumo reportado (quando disponível) de cada passo, e mantê-los consultáveis após o fim da execução, inclusive após reiniciar a aplicação.
-- **FR-016a**: O sistema MUST oferecer um histórico que lista as execuções anteriores, da mais recente para a mais antiga, exibindo data, repositório, nome da esteira, início da descrição, status final e branch do resultado.
-- **FR-016b**: Usuários MUST ser capazes de abrir qualquer execução do histórico na mesma visualização de caixas, em modo somente leitura, com status, saída, respostas, erros, duração e consumo de cada passo.
+- **FR-016**: O sistema MUST registrar entrada (o texto enviado ao agente em cada invocação), saída, erros, duração e consumo reportado (quando disponível) de cada passo, e mantê-los consultáveis após o fim da execução, inclusive após reiniciar a aplicação.
+- **FR-016a**: O sistema MUST oferecer um histórico que lista as execuções anteriores, da mais recente para a mais antiga, exibindo data, repositório, nome da esteira, início da descrição, status final, branch do resultado, duração total e consumo total (FR-017a).
+- **FR-016b**: Usuários MUST ser capazes de abrir qualquer execução do histórico na mesma visualização de caixas, em modo somente leitura, com status, entrada, saída, respostas, erros, duração e consumo de cada passo, e com os totais da execução (FR-017a).
 - **FR-016c**: O histórico MUST ser mantido por tempo indeterminado. Busca, exclusão e reexecução a partir do histórico estão fora do escopo desta versão.
 - **FR-017**: Ao final da execução, o sistema MUST exibir o resultado geral (concluída, com erro ou interrompida), o nome da branch em que o resultado final ficou e a lista de branches criadas pela execução.
+- **FR-017a**: O sistema MUST exibir, para cada execução (em andamento, finalizada ou aberta do histórico), a duração total e o consumo total, calculados como a soma da duração e do consumo reportado dos seus passos (constituição, Princípio VIII). Quando nenhum passo reportar consumo, o total MUST aparecer como indisponível.
 
 **Interrupção**
 
@@ -192,7 +195,7 @@ O usuário abre o histórico e vê a lista de execuções anteriores, da mais re
 
 - **Esteira (Pipeline)**: Sequência nomeada e ordenada de passos. Atributos: nome, lista ordenada de passos, indicador de esteira padrão. É salva como definição declarativa reutilizável.
 - **Passo (Step)**: Unidade da esteira. Atributos: nome, modelo de IA, skill ou comando a executar, posição na esteira, indicador de interativo, limite de tempo (opcional; padrão de 30 minutos).
-- **Execução (Run)**: Uma aplicação de uma esteira a um repositório. Atributos: esteira usada (cópia da definição no momento do envio), repositório alvo, descrição da feature, branch de origem, referências pré-existentes no início (branches locais, referências remotas e tags), branches criadas durante a execução, branch final do resultado, status geral, horário de início/fim.
+- **Execução (Run)**: Uma aplicação de uma esteira a um repositório. Atributos: esteira usada (cópia da definição no momento do envio), repositório alvo, descrição da feature, branch de origem, referências pré-existentes no início (branches locais, referências remotas e tags), branches criadas durante a execução, branch final do resultado, status geral, horário de início/fim. A duração total e o consumo total são derivados da soma dos passos (FR-017a), sem armazenamento próprio.
 - **Execução de Passo (Step Run)**: Registro de um passo dentro de uma execução. Atributos: passo correspondente, status, saída, respostas enviadas pelo usuário (passos interativos), mensagem de erro, motivo da interrupção (usuário ou tempo limite excedido), duração, consumo reportado.
 - **Repositório Alvo**: Repositório Git local selecionado pelo usuário. Atributos: caminho na máquina, branch atual.
 
