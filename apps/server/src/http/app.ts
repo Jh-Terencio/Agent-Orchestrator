@@ -28,7 +28,7 @@ export function createApp(deps: AppDeps): Express {
   api.use(reposRouter());
   api.use(settingsRouter(deps.settingsStore));
   api.use(pipelinesRouter(deps.pipelineStore));
-  api.use(runsRouter(deps.executor, deps.pipelineStore));
+  api.use(runsRouter(deps.executor, deps.pipelineStore, deps.runStore));
   api.use(notFoundHandler);
 
   app.use("/api", api);

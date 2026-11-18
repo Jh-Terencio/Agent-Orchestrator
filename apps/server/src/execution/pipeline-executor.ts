@@ -24,7 +24,11 @@ export interface PipelineExecutorDeps {
   agentRunner: AgentRunner;
   runStore: RunStore;
   settingsStore: SettingsStore;
-  eventHub: { broadcast(event: ServerEvent): void };
+  /** `broadcast` para eventos `run.*`; `pushOutput` para a saída dos passos, em lotes (SC-003). */
+  eventHub: {
+    broadcast(event: ServerEvent): void;
+    pushOutput(runId: string, stepIndex: number, entry: OutputEntry): void;
+  };
   lock: RunLock;
   /** Fábrica do `GitService` do repositório alvo (padrão: `new GitService(path)`). */
   git?: (repoPath: string) => GitService;
@@ -213,7 +217,7 @@ export class PipelineExecutor {
     try {
       const verify = await this.verify(active, index);
       if (verify.violations.length > 0) {
-        stepRun.errorMessage = violationMessage(verify);
+        await this.recordError(active, index, violationMessage(verify));
         await this.applyStepEvent(active, index, "ref_violation");
         return;
       }
@@ -339,11 +343,11 @@ export class PipelineExecutor {
       return this.applyStepEvent(active, index, "interrupt");
     }
     if (verify.violations.length > 0) {
-      stepRun.errorMessage = violationMessage(verify);
+      await this.recordError(active, index, violationMessage(verify));
       return this.applyStepEvent(active, index, "ref_violation");
     }
     if (outcome.kind === "error") {
-      stepRun.errorMessage = outcome.message;
+      await this.recordError(active, index, outcome.message);
       stepRun.commitSha = await active.git.commitAll(`WIP: passo ${step.name} com erro`, run.id);
       return this.applyStepEvent(active, index, "agent_error");
     }
@@ -410,7 +414,15 @@ export class PipelineExecutor {
     for (const entry of entries) {
       full.push({ seq: await runStore.nextSeq(runId, index), at: this.now(), kind: entry.kind, text: entry.text });
     }
+    // Grava no `.jsonl` antes de enviar: o que o cliente recebe sempre pode ser rebuscado pela API.
     await runStore.appendOutput(runId, index, full);
+    for (const entry of full) this.deps.eventHub.pushOutput(runId, index, entry);
+  }
+
+  /** `errorMessage` do passo e a mesma mensagem como entrada `error` da saída (FR-015). */
+  private async recordError(active: ActiveRun, index: number, message: string): Promise<void> {
+    active.run.steps[index]!.errorMessage = message;
+    await this.appendOutput(active, index, [{ kind: "error", text: message }]);
   }
 
   /** Encadeia trabalho em segundo plano; uma falha inesperada marca o run como `failed`. */
@@ -428,6 +440,11 @@ export class PipelineExecutor {
       current.status = "failed";
       current.finishedAt = this.now();
       current.errorMessage = `Erro interno do orquestrador: ${errorText(error)}`;
+      try {
+        await this.appendOutput(active, run.steps.indexOf(current), [{ kind: "error", text: current.errorMessage }]);
+      } catch (outputError) {
+        console.error("[executor] não foi possível gravar a saída de erro:", outputError);
+      }
     }
     run.status = "failed";
     try {

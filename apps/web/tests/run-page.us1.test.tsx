@@ -19,6 +19,7 @@ vi.mock("../src/api/client", async (importOriginal) => {
     getActiveRun: vi.fn(),
     reply: vi.fn(),
     advance: vi.fn(),
+    getStepOutput: vi.fn(),
   };
 });
 
@@ -100,6 +101,7 @@ beforeEach(() => {
   api.inspectRepo.mockResolvedValue(validRepo());
   api.reply.mockResolvedValue(undefined);
   api.advance.mockResolvedValue(undefined);
+  api.getStepOutput.mockResolvedValue([]);
 });
 
 describe("RepoPicker", () => {

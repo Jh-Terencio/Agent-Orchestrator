@@ -1,11 +1,20 @@
 import { Router } from "express";
+import { z } from "zod";
 import { ReplyRequestSchema, StartRunRequestSchema } from "@orchestrator/shared";
 import type { PipelineExecutor } from "../../execution/pipeline-executor.js";
 import type { PipelineStore } from "../../storage/pipeline-store.js";
-import { fromZodError } from "../errors.js";
+import type { RunStore } from "../../storage/run-store.js";
+import { ApiError, fromZodError } from "../errors.js";
+
+const OutputQuerySchema = z.object({
+  afterSeq: z.coerce
+    .number({ message: "afterSeq deve ser um número inteiro" })
+    .int({ message: "afterSeq deve ser um número inteiro" })
+    .optional(),
+});
 
 /** Execuções (contracts/rest-api.md, "Execuções"). */
-export function runsRouter(executor: PipelineExecutor, pipelineStore: PipelineStore): Router {
+export function runsRouter(executor: PipelineExecutor, pipelineStore: PipelineStore, runStore: RunStore): Router {
   const router = Router();
 
   router.post("/runs", async (req, res) => {
@@ -24,6 +33,17 @@ export function runsRouter(executor: PipelineExecutor, pipelineStore: PipelineSt
 
   router.get("/runs/:id", async (req, res) => {
     res.json(await executor.getRun(req.params.id));
+  });
+
+  // Saída completa ou incremental de um passo (FR-015/FR-016).
+  router.get("/runs/:id/steps/:index/output", async (req, res) => {
+    const run = await executor.getRun(req.params.id); // 404 se a execução não existir
+    const raw = req.params.index;
+    const index = /^\d+$/.test(raw) ? Number(raw) : -1;
+    if (index < 0 || index >= run.steps.length) throw new ApiError(404, "NOT_FOUND", "Passo não encontrado");
+    const query = OutputQuerySchema.safeParse(req.query);
+    if (!query.success) throw fromZodError(query.error, "Parâmetros inválidos");
+    res.json(await runStore.readOutput(run.id, index, query.data.afterSeq));
   });
 
   router.post("/runs/:id/reply", async (req, res) => {

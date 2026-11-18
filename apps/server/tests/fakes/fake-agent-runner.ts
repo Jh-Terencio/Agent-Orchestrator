@@ -5,6 +5,8 @@ import type { AgentInvocation, AgentOutcome, AgentRunner } from "../../src/agent
 export interface FakeScript {
   /** Entradas emitidas via `onOutput`, em ordem, antes do atraso. */
   outputs?: Array<Omit<OutputEntry, "seq" | "at">>;
+  /** Espera (ms) entre uma entrada de `outputs` e a seguinte (saída espaçada, como o agente real). Padrão 0. */
+  outputIntervalMs?: number;
   /** Simula o trabalho do agente no repositório; roda antes de resolver, inclusive se interrompido. */
   sideEffect?: (cwd: string) => Promise<void>;
   /** Atraso (ms) via `setTimeout`, controlável por `vi.useFakeTimers()`. Padrão 0. */
@@ -24,6 +26,8 @@ export type RecordedInvocation = Omit<AgentInvocation, "signal" | "onOutput" | "
  */
 export class FakeAgentRunner implements AgentRunner {
   readonly invocations: RecordedInvocation[] = [];
+  /** Cada entrada efetivamente entregue a `onOutput`, com o instante (`Date.now()`) da emissão. */
+  readonly emitted: Array<{ text: string; at: number }> = [];
   private readonly queue: FakeScript[];
 
   constructor(scripts: FakeScript[] = [], private readonly fallback: FakeScript = {}) {
@@ -45,11 +49,16 @@ export class FakeAgentRunner implements AgentRunner {
 
     let open = true;
     const emit: AgentInvocation["onOutput"] = (entry) => {
-      if (open) onOutput(entry);
+      if (!open) return;
+      this.emitted.push({ text: entry.text, at: Date.now() });
+      onOutput(entry);
     };
 
     try {
+      let first = true;
       for (const entry of script.outputs ?? []) {
+        if (!first && script.outputIntervalMs && (await waitOrAbort(script.outputIntervalMs, signal))) break;
+        first = false;
         if (signal.aborted) break;
         emit(entry);
       }

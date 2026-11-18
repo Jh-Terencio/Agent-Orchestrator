@@ -80,7 +80,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     agentRunner,
     runStore,
     settingsStore,
-    eventHub: { broadcast: (event) => hubRef?.broadcast(event) },
+    eventHub: {
+      broadcast: (event) => hubRef?.broadcast(event),
+      pushOutput: (runId, stepIndex, entry) => hubRef?.pushOutput(runId, stepIndex, entry),
+    },
     lock: new RunLock(),
   });
 

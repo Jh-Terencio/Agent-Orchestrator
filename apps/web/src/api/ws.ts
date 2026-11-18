@@ -54,6 +54,15 @@ export function connectEvents(
   return () => {
     stopped = true;
     if (retryTimer !== undefined) clearTimeout(retryTimer);
-    socket?.close();
+    const current = socket;
+    if (current === null) return;
+    current.onmessage = null;
+    if (current.readyState === WebSocket.CONNECTING) {
+      // Fechar durante o handshake aborta o socket, e o proxy do Vite registra `ECONNABORTED`
+      // (acontece em dev porque o StrictMode monta e desmonta o efeito). Fecha assim que abrir.
+      current.onopen = () => current.close();
+    } else {
+      current.close();
+    }
   };
 }

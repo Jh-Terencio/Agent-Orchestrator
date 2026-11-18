@@ -1,14 +1,18 @@
 import { useEffect, useState } from "react";
-import type { RepoInfo } from "@orchestrator/shared";
+import type { Pipeline, RepoInfo } from "@orchestrator/shared";
 import { ApiClientError, getActiveRun, listPipelines, startRun } from "../api/client";
 import { FeatureInput } from "../components/FeatureInput";
 import { InteractiveReply } from "../components/InteractiveReply";
+import { PipelineBoxes } from "../components/PipelineBoxes";
 import { RepoPicker } from "../components/RepoPicker";
 import { RunSummary } from "../components/RunSummary";
-import { STEP_STATUS_LABELS } from "../format";
+import { StepOutputPanel } from "../components/StepOutputPanel";
 import { useRunStore } from "../state/run-store";
 
-/** Página de execução (US1): repositório e descrição no topo, passos, resposta interativa e resumo. */
+/**
+ * Página de execução: repositório e descrição no topo, caixas dos passos com a saída do passo
+ * selecionado (US2), resposta interativa e resumo (US1).
+ */
 export function RunPage() {
   const { state, dispatch } = useRunStore();
   const { run } = state;
@@ -17,6 +21,31 @@ export function RunPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [branchNotice, setBranchNotice] = useState<string | null>(null);
+  /** Esteira mostrada antes do envio (todos os passos "aguardando"). */
+  const [previewPipeline, setPreviewPipeline] = useState<Pipeline | null>(null);
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    listPipelines().then(
+      (pipelines) => alive && setPreviewPipeline(pipelines[0] ?? null),
+      (err: unknown) => console.warn("[run-page] não foi possível listar as esteiras", err),
+    );
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Seleciona automaticamente o passo em execução (ou aguardando resposta) sempre que ele muda.
+  const currentIndex = run
+    ? run.steps.findIndex((step) => step.status === "running" || step.status === "awaiting_input")
+    : -1;
+  useEffect(() => {
+    if (currentIndex >= 0) setSelectedIndex(currentIndex);
+  }, [run?.id, currentIndex]);
+  useEffect(() => {
+    if (run === null) setSelectedIndex(null);
+  }, [run]);
 
   // Restaura a execução em andamento ao carregar a página.
   useEffect(() => {
@@ -68,6 +97,7 @@ export function RunPage() {
 
   const awaitingIndex = run ? run.steps.findIndex((step) => step.status === "awaiting_input") : -1;
   const awaitingStep = run && awaitingIndex >= 0 ? run.pipeline.steps[awaitingIndex] : undefined;
+  const selectedStep = run && selectedIndex !== null ? run.pipeline.steps[selectedIndex] : undefined;
 
   return (
     <section className="page" aria-labelledby="run-page-title">
@@ -100,21 +130,34 @@ export function RunPage() {
         </p>
       )}
 
+      {state.connection === "reconnecting" && (
+        <p className="warn" role="status">
+          Conexão perdida; reconectando…
+        </p>
+      )}
+
+      {run === null && previewPipeline && (
+        <PipelineBoxes steps={previewPipeline.steps} stepRuns={null} selectedIndex={null} onSelect={() => {}} />
+      )}
+
       {run && (
         <>
-          <ol className="steps" aria-label="Passos da execução">
-            {run.pipeline.steps.map((step, index) => {
-              const status = run.steps[index]?.status ?? "waiting";
-              const message = run.steps[index]?.errorMessage;
-              return (
-                <li key={step.id} className={`step step-${status}`}>
-                  <span className="step-name">{step.name}</span>{" "}
-                  <span className="step-status">{STEP_STATUS_LABELS[status]}</span>
-                  {message && <p className="error">{message}</p>}
-                </li>
-              );
-            })}
-          </ol>
+          <PipelineBoxes
+            steps={run.pipeline.steps}
+            stepRuns={run.steps}
+            selectedIndex={selectedIndex}
+            onSelect={setSelectedIndex}
+          />
+
+          {selectedStep && selectedIndex !== null && (
+            <StepOutputPanel
+              key={`${run.id}:${selectedIndex}`}
+              runId={run.id}
+              stepIndex={selectedIndex}
+              step={selectedStep}
+              started={(run.steps[selectedIndex]?.status ?? "waiting") !== "waiting"}
+            />
+          )}
 
           {awaitingStep && runActive && <InteractiveReply runId={run.id} stepName={awaitingStep.name} />}
 

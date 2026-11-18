@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   createDefaultPipeline,
+  type OutputEntry,
   type Pipeline,
   type Run,
   type ServerEvent,
@@ -26,6 +27,8 @@ let dataDir: string;
 let runStore: RunStore;
 let settingsStore: SettingsStore;
 let events: ServerEvent[];
+/** Entradas passadas a `eventHub.pushOutput`, em ordem. */
+let pushed: Array<{ runId: string; stepIndex: number; entry: OutputEntry }>;
 let lock: RunLock;
 let runner: FakeAgentRunner;
 let executor: PipelineExecutor;
@@ -53,7 +56,10 @@ function makeExecutor(scripts: FakeScript[] = [], fallback: FakeScript = { sideE
     agentRunner: runner,
     runStore,
     settingsStore,
-    eventHub: { broadcast: (event) => events.push(event) },
+    eventHub: {
+      broadcast: (event) => events.push(event),
+      pushOutput: (runId, stepIndex, entry) => pushed.push({ runId, stepIndex, entry }),
+    },
     lock,
     ...(clock ? { clock } : {}),
   });
@@ -121,6 +127,7 @@ beforeEach(async () => {
   runStore = new RunStore(dataDir);
   settingsStore = new SettingsStore(dataDir);
   events = [];
+  pushed = [];
   lock = new RunLock();
   fileCounter = 0;
 });
@@ -505,5 +512,67 @@ describe("PipelineExecutor (US1): erros", () => {
     makeExecutor();
     await expectApiError(executor.reply("33333333-3333-4333-8333-333333333333", "oi"), 404, "NOT_FOUND");
     await expectApiError(executor.advance("33333333-3333-4333-8333-333333333333"), 404, "NOT_FOUND");
+  });
+});
+
+describe("PipelineExecutor (US2): saída em tempo real", () => {
+  it("envia cada entrada ao eventHub.pushOutput na ordem, depois de gravá-la no .jsonl", async () => {
+    makeExecutor([
+      {
+        outputs: [
+          { kind: "text", text: "olá" },
+          { kind: "tool_use", text: "Bash: ls" },
+        ],
+        sideEffect: writesFile,
+      },
+    ]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await finished();
+    for (const index of [0, 1]) {
+      const stored = await runStore.readOutput(run.id, index);
+      const sent = pushed.filter((item) => item.stepIndex === index).map((item) => item.entry);
+      expect(sent).toEqual(stored);
+    }
+    expect(pushed.every((item) => item.runId === run.id)).toBe(true);
+    expect(pushed.filter((item) => item.stepIndex === 0).map((item) => item.entry.text)).toEqual([
+      `Entrada: /speckit-specify ${DESCRIPTION}`,
+      "olá",
+      "Bash: ls",
+    ]);
+  });
+
+  it("user_reply também é enviado como saída", async () => {
+    makeExecutor([{ sideEffect: writesFile }]);
+    const pipeline = twoStepPipeline([{ interactive: true }]);
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await executor.whenIdle();
+    await executor.reply(run.id, "Use OAuth");
+    await executor.whenIdle();
+    expect(pushed.map((item) => item.entry)).toContainEqual(expect.objectContaining({ kind: "user_reply", text: "Use OAuth" }));
+  });
+
+  it("passo que falha gera uma entrada error com a mensagem, gravada e enviada", async () => {
+    makeExecutor([{ result: "error", errorMessage: "modelo indisponível" }]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await finished();
+    const stored = await runStore.readOutput(run.id, 0);
+    expect(stored.at(-1)).toMatchObject({ kind: "error", text: "modelo indisponível" });
+    expect(pushed.at(-1)?.entry).toEqual(stored.at(-1));
+  });
+
+  it("violação de refs gera uma entrada error citando a ref", async () => {
+    makeExecutor([{ sideEffect: async (cwd) => void (await gitIn(cwd, "tag", "v-proibida")) }]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await finished();
+    const stored = await runStore.readOutput(run.id, 0);
+    expect(stored.at(-1)?.kind).toBe("error");
+    expect(stored.at(-1)?.text).toContain("refs/tags/v-proibida");
   });
 });
