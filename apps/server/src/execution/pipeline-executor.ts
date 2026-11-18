@@ -2,9 +2,15 @@ import { randomUUID } from "node:crypto";
 import {
   computeRunTotals,
   DEFAULT_TIMEOUT_MINUTES,
+  deriveRule,
+  matchesRule,
+  PipelineSchema,
+  summarizeToolInput,
   type InterruptReason,
   type Invocation,
   type OutputEntry,
+  type PermissionDecision,
+  type PermissionRequest,
   type Pipeline,
   type RepoInfo,
   type RepoProblem,
@@ -13,17 +19,25 @@ import {
   type StepRun,
   type StepStatus,
 } from "@orchestrator/shared";
-import type { AgentOutcome, AgentRunner } from "../agent/agent-runner.js";
+import type { AgentOutcome, AgentRunner, PermissionChannel, RelayDecision } from "../agent/agent-runner.js";
 import { commandExists as defaultCommandExists } from "../agent/command-lookup.js";
 import { GitService, type VerifyResult } from "../git/git-service.js";
-import { ApiError } from "../http/errors.js";
+import { ApiError, toApiIssues } from "../http/errors.js";
 import type { RunStore } from "../storage/run-store.js";
 import type { SettingsStore } from "../storage/settings-store.js";
+import { createPausableTimer, type PausableTimer } from "./pausable-timer.js";
+import type { PermissionBroker, PermissionCall } from "./permission-broker.js";
 import { runAlreadyActive, type RunLock } from "./run-lock.js";
 import { transitionRun, transitionStep, type StepEvent } from "./state-machine.js";
 
+export const DENIED_BY_USER_MESSAGE = "Negado pelo usuário no orquestrador.";
+export const INTERRUPTED_MESSAGE = "Execução interrompida.";
+export const CLI_GAVE_UP_MESSAGE = "A CLI desistiu de esperar pela decisão";
+
 export interface PipelineExecutorDeps {
   agentRunner: AgentRunner;
+  /** Canais de permissão por invocação (US6, research R13). */
+  permissionBroker: PermissionBroker;
   runStore: RunStore;
   settingsStore: SettingsStore;
   /** `broadcast` para eventos `run.*`; `pushOutput` para a saída dos passos, em lotes (SC-003). */
@@ -47,6 +61,8 @@ export interface StartRunInput {
   description: string;
   /** Branch exibida na tela no momento do envio (FR-003a). */
   expectedBranch: string;
+  /** Modo Yolo (FR-027): sem pedidos de permissão. */
+  yolo: boolean;
 }
 
 interface ActiveRun {
@@ -60,10 +76,19 @@ interface ActiveRun {
   pendingAbort: InterruptReason | null;
   /** Motivo do abort da última invocação (`signal.reason`). */
   lastAbortReason: InterruptReason | null;
+  /** Limite de tempo da invocação em andamento, pausado em `awaiting_permission` (FR-032). */
+  timer: PausableTimer | null;
+  /** Respostas à CLI ainda pendentes, por id do `PermissionRequest`. */
+  permissionWaiters: Map<string, (decision: RelayDecision) => void>;
+  /** Gravações do `run.json` em fila: pedidos de permissão podem chegar em paralelo. */
+  saveQueue: Promise<void>;
+  /** Escritas da saída em fila, para o `seq` seguir a ordem de chegada. */
+  outputQueue: Promise<void>;
 }
 
 const TERMINAL_RUN = new Set<Run["status"]>(["completed", "failed", "interrupted"]);
 const TERMINAL_STEP = new Set<StepStatus>(["completed", "failed", "interrupted"]);
+const ACTIVE_STEP = new Set<StepStatus>(["running", "awaiting_input", "awaiting_permission"]);
 const INTERRUPT_REASONS = new Set<string>(["user", "timeout", "server_shutdown"]);
 const REASON_EVENT: Record<InterruptReason, StepEvent> = {
   user: "interrupt",
@@ -123,6 +148,17 @@ export class PipelineExecutor {
     const { lock } = this.deps;
     if (lock.activeRunId !== null) throw runAlreadyActive(lock.activeRunId);
 
+    // Revalida a esteira antes de executar (FR-024): nada é criado se ela for inválida.
+    const validated = PipelineSchema.safeParse(input.pipeline);
+    if (!validated.success) {
+      throw new ApiError(
+        422,
+        "PIPELINE_INVALID",
+        "A esteira é inválida; corrija-a no editor de esteiras antes de executar",
+        toApiIssues(validated.error),
+      );
+    }
+
     const info = await this.inspect(input.repoPath);
     if (!info.valid) {
       throw new ApiError(
@@ -173,13 +209,26 @@ export class PipelineExecutor {
         initialBranch,
         createdBranches: [initialBranch],
         finalBranch: null,
+        yolo: input.yolo,
+        permissionRules: [],
         status: "running",
         startedAt: this.now(),
         finishedAt: null,
         steps: pipeline.steps.map((step) => newStepRun(step.id)),
       };
       await this.deps.runStore.save(run);
-      active = { run, git, busy: false, controller: null, pendingAbort: null, lastAbortReason: null };
+      active = {
+        run,
+        git,
+        busy: false,
+        controller: null,
+        pendingAbort: null,
+        lastAbortReason: null,
+        timer: null,
+        permissionWaiters: new Map(),
+        saveQueue: Promise.resolve(),
+        outputQueue: Promise.resolve(),
+      };
     } catch (error) {
       lock.release(runId);
       throw error;
@@ -277,15 +326,150 @@ export class PipelineExecutor {
     await this.whenIdle();
   }
 
+  /**
+   * Decisão do usuário sobre um pedido de permissão (FR-029): responde à CLI e, sem outros pedidos
+   * pendentes, o passo volta a `running` e o limite de tempo é retomado (FR-032).
+   * `404` sem execução ou pedido; `409 INVALID_STATE` se o pedido já foi decidido.
+   */
+  async decidePermission(runId: string, requestId: string, decision: PermissionDecision): Promise<void> {
+    const active = await this.requireActive(runId);
+    const { run } = active;
+    const index = run.steps.findIndex((step) => step.permissionRequests.some((request) => request.id === requestId));
+    if (index < 0) throw new ApiError(404, "NOT_FOUND", "Pedido de permissão não encontrado");
+    const stepRun = run.steps[index]!;
+    const request = stepRun.permissionRequests.find((item) => item.id === requestId)!;
+    const waiter = active.permissionWaiters.get(requestId);
+    if (request.status !== "pending" || waiter === undefined) {
+      throw new ApiError(409, "INVALID_STATE", "Este pedido de permissão já foi decidido.");
+    }
+
+    // Tudo síncrono até aqui: um segundo clique já encontra o pedido decidido.
+    active.permissionWaiters.delete(requestId);
+    request.decidedAt = this.now();
+    let reply: RelayDecision;
+    let text: string;
+    if (decision === "deny") {
+      request.status = "denied";
+      reply = { behavior: "deny", message: DENIED_BY_USER_MESSAGE };
+      text = `Negado: ${request.summary}`;
+    } else if (decision === "allow_always") {
+      const rule = deriveRule(request.toolName, request.input);
+      request.status = "allowed_always";
+      request.rule = rule;
+      if (!run.permissionRules.includes(rule)) run.permissionRules.push(rule);
+      reply = { behavior: "allow", updatedInput: request.input };
+      text = `Permitido sempre: ${rule}`;
+    } else {
+      request.status = "allowed_once";
+      reply = { behavior: "allow", updatedInput: request.input };
+      text = `Permitido uma vez: ${request.summary}`;
+    }
+    const resume = stepRun.status === "awaiting_permission" && !hasPending(stepRun);
+    if (resume) this.applyStepStatus(active, index, "permission_decision");
+
+    await this.appendOutput(active, index, [{ kind: "system", text }]);
+    if (resume) active.timer?.resume();
+    waiter(reply);
+    await this.persist(active);
+  }
+
   // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Pedido de permissão vindo do relay (research R13). Casa com uma regra de "permitir sempre" → `allow`
+   * na hora; senão registra o pedido, pausa o passo e o limite de tempo e espera `decidePermission`.
+   * A parte síncrona registra o pedido antes de qualquer `await`, para a ordem dos pedidos ser a de chegada.
+   */
+  private onPermissionRequest(
+    active: ActiveRun,
+    index: number,
+    controller: AbortController,
+    call: PermissionCall,
+  ): Promise<RelayDecision> {
+    const { run } = active;
+    const stepRun = run.steps[index]!;
+    if (this.active !== active || controller.signal.aborted || active.pendingAbort !== null) {
+      return Promise.resolve({ behavior: "deny", message: INTERRUPTED_MESSAGE });
+    }
+    const request: PermissionRequest = {
+      id: randomUUID(),
+      toolUseId: call.toolUseId,
+      toolName: call.toolName,
+      input: call.input,
+      summary: `${call.toolName}: ${summarizeToolInput(call.input)}`,
+      status: "pending",
+      rule: null,
+      requestedAt: this.now(),
+      decidedAt: null,
+    };
+    stepRun.permissionRequests.push(request);
+
+    const rule = run.permissionRules.find((candidate) => matchesRule(candidate, call.toolName, call.input));
+    if (rule !== undefined) {
+      request.status = "auto_allowed";
+      request.rule = rule;
+      request.decidedAt = request.requestedAt;
+      return (async () => {
+        await this.appendOutput(active, index, [
+          { kind: "system", text: `Permitido pela regra ${rule}: ${request.summary}` },
+        ]);
+        await this.persist(active);
+        return { behavior: "allow", updatedInput: call.input } satisfies RelayDecision;
+      })();
+    }
+
+    const decision = new Promise<RelayDecision>((resolve) => active.permissionWaiters.set(request.id, resolve));
+    this.applyStepStatus(active, index, "permission_request");
+    active.timer?.pause();
+    void (async () => {
+      await this.appendOutput(active, index, [{ kind: "system", text: `Permissão pedida: ${request.summary}` }]);
+      await this.persist(active);
+    })().catch((error: unknown) => console.error("[executor] não foi possível registrar o pedido:", error));
+    return decision;
+  }
+
+  /**
+   * Pedidos ainda pendentes viram `cancelled` e a CLI recebe `deny` (interrupção, encerramento ou fim
+   * da invocação). Não grava: quem chama persiste depois.
+   */
+  private async cancelPendingPermissions(active: ActiveRun, index: number, reason: string): Promise<void> {
+    const stepRun = active.run.steps[index];
+    if (!stepRun) return;
+    const texts: string[] = [];
+    for (const request of stepRun.permissionRequests) {
+      if (request.status !== "pending") continue;
+      request.status = "cancelled";
+      request.decidedAt = this.now();
+      texts.push(`Pedido de permissão cancelado (${reason}): ${request.summary}`);
+      const waiter = active.permissionWaiters.get(request.id);
+      active.permissionWaiters.delete(request.id);
+      waiter?.({ behavior: "deny", message: `${reason}.` });
+    }
+    if (texts.length > 0) await this.appendOutput(active, index, texts.map((text) => ({ kind: "system", text })));
+  }
+
+  /** Transição sem gravar (a gravação vem logo depois, na mesma operação). */
+  private applyStepStatus(active: ActiveRun, index: number, event: StepEvent): void {
+    const { run } = active;
+    const stepRun = run.steps[index]!;
+    const step = run.pipeline.steps[index]!;
+    stepRun.status = transitionStep(stepRun.status, event, { interactive: step.interactive });
+    run.status = transitionRun(run.status, stepRun.status, { isLastStep: this.isLast(active, index) });
+  }
 
   private async requestInterrupt(active: ActiveRun, reason: InterruptReason): Promise<void> {
     if (active.run.status === "awaiting_input" && !active.busy) {
       await this.interruptAwaiting(active, reason);
       return;
     }
-    // `server_shutdown` prevalece sobre um pedido anterior do usuário.
+    // `server_shutdown` prevalece sobre um pedido anterior do usuário. Definido antes de cancelar os
+    // pedidos, para um pedido novo que chegue durante o cancelamento já ser negado.
     if (active.pendingAbort === null || reason === "server_shutdown") active.pendingAbort = reason;
+    const waitingIndex = active.run.steps.findIndex((step) => step.status === "awaiting_permission");
+    if (waitingIndex >= 0) {
+      // A CLI recebe `deny` antes de o processo ser encerrado (Review Focus 2).
+      await this.cancelPendingPermissions(active, waitingIndex, INTERRUPTED_MESSAGE.slice(0, -1));
+    }
     active.controller?.abort(reason);
   }
 
@@ -378,8 +562,16 @@ export class PipelineExecutor {
     if (active.pendingAbort !== null) controller.abort(active.pendingAbort);
     // setTimeout (e não AbortSignal.timeout) para os fake timers controlarem o limite (research R4).
     // O timer é por invocação: a pausa em awaiting_input não conta e cada resposta recebe o limite inteiro.
+    // Ele é pausado enquanto houver pedidos de permissão pendentes (FR-032).
     const timeoutMs = (step.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES) * 60_000;
-    const timer = setTimeout(() => controller.abort("timeout"), timeoutMs);
+    const timer = createPausableTimer(timeoutMs, () => controller.abort("timeout"));
+    active.timer = timer;
+
+    // Fora do Modo Yolo, um canal de permissão por invocação (research R13).
+    const { permissionBroker } = this.deps;
+    const channel: PermissionChannel | null = run.yolo
+      ? null
+      : permissionBroker.openChannel((call) => this.onPermissionRequest(active, index, controller, call));
 
     let outputChain: Promise<void> = Promise.resolve();
     let outputError: unknown = null;
@@ -393,6 +585,7 @@ export class PipelineExecutor {
         resume,
         interactive: step.interactive,
         priorSessionCostUsd,
+        permissionChannel: channel,
         signal: controller.signal,
         onOutput: (entry) => {
           outputChain = outputChain
@@ -403,12 +596,15 @@ export class PipelineExecutor {
         },
       });
     } finally {
-      clearTimeout(timer);
+      timer.clear();
+      if (active.timer === timer) active.timer = null;
+      if (channel !== null) permissionBroker.closeChannel(channel.token);
       if (active.controller === controller) active.controller = null;
     }
     if (controller.signal.aborted) active.lastAbortReason = toInterruptReason(controller.signal.reason);
     await outputChain;
     if (outputError !== null) throw outputError;
+    await this.settlePermissionsAfterInvocation(active, index, outcome);
 
     const invocation: Invocation = {
       prompt,
@@ -424,6 +620,24 @@ export class PipelineExecutor {
     stepRun.durationMs = totals.durationMs;
     stepRun.usage = totals.usage;
     return outcome;
+  }
+
+  /**
+   * O processo do agente terminou: nenhum pedido pode continuar pendente. Os que restarem (a CLI
+   * desistiu de esperar ou terminou sem esperar) viram `cancelled`. Se o passo ainda estiver em
+   * `awaiting_permission`, ele volta a `running` para seguir o caminho normal de `afterInvocation`,
+   * exceto numa interrupção do usuário ou do encerramento, que vale também em `awaiting_permission`.
+   */
+  private async settlePermissionsAfterInvocation(active: ActiveRun, index: number, outcome: AgentOutcome) {
+    const stepRun = active.run.steps[index]!;
+    if (hasPending(stepRun)) {
+      const reason = outcome.kind === "interrupted" ? INTERRUPTED_MESSAGE.slice(0, -1) : CLI_GAVE_UP_MESSAGE;
+      await this.cancelPendingPermissions(active, index, reason);
+    }
+    if (stepRun.status !== "awaiting_permission") return;
+    const reason = active.lastAbortReason ?? active.pendingAbort;
+    const interruptsDirectly = outcome.kind === "interrupted" && reason !== null && reason !== "timeout";
+    if (!interruptsDirectly) this.applyStepStatus(active, index, "permission_decision");
   }
 
   /** Saída de `running`: verificação de refs sempre, depois commit conforme o resultado. */
@@ -492,7 +706,7 @@ export class PipelineExecutor {
       console.warn("[executor] não foi possível ler a branch final:", errorText(error));
     }
     try {
-      await this.deps.runStore.save(run);
+      await this.save(active);
     } finally {
       if (this.active === active) this.active = null;
       this.deps.lock.release(run.id);
@@ -501,15 +715,35 @@ export class PipelineExecutor {
   }
 
   private async persist(active: ActiveRun): Promise<void> {
-    await this.deps.runStore.save(active.run);
-    this.emitUpdated(active);
+    // Depois do estado terminal, `finish` já gravou e emitiu `run.finished`.
+    if (this.active !== active) return;
+    await this.save(active);
+    if (this.active === active) this.emitUpdated(active);
+  }
+
+  /** Gravações do mesmo run em fila (o rename atômico não tolera duas escritas simultâneas). */
+  private save(active: ActiveRun): Promise<void> {
+    const task = active.saveQueue.then(() => this.deps.runStore.save(active.run));
+    active.saveQueue = task.catch(() => undefined);
+    return task;
   }
 
   private emitUpdated(active: ActiveRun): void {
     this.deps.eventHub.broadcast({ type: "run.updated", run: structuredClone(active.run) });
   }
 
-  private async appendOutput(active: ActiveRun, index: number, entries: Array<Omit<OutputEntry, "seq" | "at">>) {
+  /** Escritas da saída em fila: o `seq` segue a ordem de chegada mesmo com pedidos de permissão em paralelo. */
+  private appendOutput(
+    active: ActiveRun,
+    index: number,
+    entries: Array<Omit<OutputEntry, "seq" | "at">>,
+  ): Promise<void> {
+    const task = active.outputQueue.then(() => this.writeOutput(active, index, entries));
+    active.outputQueue = task.catch(() => undefined);
+    return task;
+  }
+
+  private async writeOutput(active: ActiveRun, index: number, entries: Array<Omit<OutputEntry, "seq" | "at">>) {
     const { runStore } = this.deps;
     const runId = active.run.id;
     const full: OutputEntry[] = [];
@@ -537,8 +771,16 @@ export class PipelineExecutor {
     console.error("[executor] falha inesperada:", error);
     if (this.active !== active) return;
     const { run } = active;
-    const current = run.steps.find((step) => step.status === "running" || step.status === "awaiting_input");
+    const current = run.steps.find((step) => ACTIVE_STEP.has(step.status));
     if (current) {
+      for (const request of current.permissionRequests) {
+        if (request.status !== "pending") continue;
+        request.status = "cancelled";
+        request.decidedAt = this.now();
+        const waiter = active.permissionWaiters.get(request.id);
+        active.permissionWaiters.delete(request.id);
+        waiter?.({ behavior: "deny", message: "Erro interno do orquestrador; comando negado." });
+      }
       current.status = "failed";
       current.finishedAt = this.now();
       current.errorMessage = `Erro interno do orquestrador: ${errorText(error)}`;
@@ -595,7 +837,12 @@ function newStepRun(stepId: string): StepRun {
     finishedAt: null,
     durationMs: null,
     usage: null,
+    permissionRequests: [],
   };
+}
+
+function hasPending(stepRun: StepRun): boolean {
+  return stepRun.permissionRequests.some((request) => request.status === "pending");
 }
 
 function violationMessage(verify: VerifyResult): string {

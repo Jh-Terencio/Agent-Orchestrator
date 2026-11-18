@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { PipelineEditorPage } from "./pages/PipelineEditorPage";
 import { RunPage } from "./pages/RunPage";
 import { RunStoreProvider, useRunStore } from "./state/run-store";
 
@@ -53,7 +54,7 @@ export function App() {
       <main>
         {tab === "run" && <RunPage />}
         {tab === "history" && <ComingSoon title="Histórico" />}
-        {tab === "pipelines" && <ComingSoon title="Esteiras" />}
+        {tab === "pipelines" && <PipelineEditorPage />}
       </main>
     </RunStoreProvider>
   );

@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { ReplyRequestSchema, StartRunRequestSchema } from "@orchestrator/shared";
+import { PermissionDecisionRequestSchema, ReplyRequestSchema, StartRunRequestSchema } from "@orchestrator/shared";
 import type { PipelineExecutor } from "../../execution/pipeline-executor.js";
 import type { PipelineStore } from "../../storage/pipeline-store.js";
 import type { RunStore } from "../../storage/run-store.js";
@@ -58,9 +58,17 @@ export function runsRouter(executor: PipelineExecutor, pipelineStore: PipelineSt
     res.status(202).end();
   });
 
-  // Interromper (FR-018): 202; 409 INVALID_STATE se não estiver em running/awaiting_input; 404 se não existir.
+  // Interromper (FR-018): 202 em running/awaiting_input/awaiting_permission; 409 INVALID_STATE se terminal; 404 se não existir.
   router.post("/runs/:id/interrupt", async (req, res) => {
     await executor.interrupt(req.params.id);
+    res.status(202).end();
+  });
+
+  // Decisão sobre um pedido de permissão (FR-029): 202; 409 INVALID_STATE se já decidido; 404 sem run/pedido.
+  router.post("/runs/:id/permissions/:requestId", async (req, res) => {
+    const parsed = PermissionDecisionRequestSchema.safeParse(req.body);
+    if (!parsed.success) throw fromZodError(parsed.error, "Decisão inválida");
+    await executor.decidePermission(req.params.id, req.params.requestId, parsed.data.decision);
     res.status(202).end();
   });
 

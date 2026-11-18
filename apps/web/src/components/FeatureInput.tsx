@@ -7,11 +7,23 @@ interface FeatureInputProps {
   /** Repositório válido e nenhuma execução ativa. */
   canSubmit: boolean;
   submitting?: boolean;
+  /** Modo Yolo (FR-027): desmarcado por padrão, escolhido a cada envio. */
+  yolo: boolean;
+  onYoloChange: (value: boolean) => void;
 }
 
 /** Descrição da feature + "Enviar" (FR-003): desabilitado com descrição vazia, repositório inválido ou run ativo. */
-export function FeatureInput({ value, onChange, onSubmit, canSubmit, submitting = false }: FeatureInputProps) {
+export function FeatureInput({
+  value,
+  onChange,
+  onSubmit,
+  canSubmit,
+  submitting = false,
+  yolo,
+  onYoloChange,
+}: FeatureInputProps) {
   const id = useId();
+  const yoloId = useId();
   const [warning, setWarning] = useState<string | null>(null);
   const empty = value.trim().length === 0;
 
@@ -51,6 +63,22 @@ export function FeatureInput({ value, onChange, onSubmit, canSubmit, submitting 
         }}
         onKeyDown={onKeyDown}
       />
+      <div className="yolo">
+        <input
+          id={yoloId}
+          type="checkbox"
+          checked={yolo}
+          disabled={submitting}
+          onChange={(event) => onYoloChange(event.target.checked)}
+        />
+        <label htmlFor={yoloId}>Modo Yolo: o agente executa qualquer comando sem perguntar</label>
+      </div>
+      {yolo && (
+        <p className="warn yolo-warning" role="note">
+          Com o Modo Yolo, o agente roda comandos na sua máquina sem pedir confirmação. Os bloqueios de git
+          continuam valendo.
+        </p>
+      )}
       <div className="row">
         <button type="submit" className="primary" disabled={empty || !canSubmit || submitting}>
           Enviar

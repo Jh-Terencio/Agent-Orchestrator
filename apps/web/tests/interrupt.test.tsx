@@ -54,6 +54,7 @@ function stepRun(index: number, overrides: Partial<StepRun> = {}): StepRun {
     finishedAt: null,
     durationMs: null,
     usage: null,
+    permissionRequests: [],
     ...overrides,
   };
 }
@@ -70,6 +71,8 @@ function makeRun(status: RunStatus, steps: Partial<StepRun>[]): Run {
     initialBranch: "orchestrator/20261117-120000-adicionar-login",
     createdBranches: ["orchestrator/20261117-120000-adicionar-login"],
     finalBranch: null,
+    yolo: false,
+    permissionRules: [],
     status,
     startedAt: NOW,
     finishedAt: status === "running" || status === "awaiting_input" ? null : NOW,

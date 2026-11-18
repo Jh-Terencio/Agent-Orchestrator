@@ -1,4 +1,11 @@
-import type { InterruptReason, RepoProblem, RunStatus, StepStatus, Usage } from "@orchestrator/shared";
+import type {
+  InterruptReason,
+  PermissionRequestStatus,
+  RepoProblem,
+  RunStatus,
+  StepStatus,
+  Usage,
+} from "@orchestrator/shared";
 
 export const PROBLEM_LABELS: Record<RepoProblem, string> = {
   not_a_repo: "A pasta não é um repositório Git",
@@ -12,6 +19,7 @@ export const STEP_STATUS_LABELS: Record<StepStatus, string> = {
   waiting: "aguardando",
   running: "executando",
   awaiting_input: "aguardando resposta",
+  awaiting_permission: "aguardando permissão",
   completed: "concluído",
   failed: "com erro",
   interrupted: "interrompido",
@@ -24,9 +32,20 @@ export const INTERRUPT_REASON_LABELS: Record<InterruptReason, string> = {
   server_shutdown: "aplicação encerrada",
 };
 
+/** Decisão de cada pedido de permissão, mostrada no resumo da execução (FR-031). */
+export const PERMISSION_STATUS_LABELS: Record<PermissionRequestStatus, string> = {
+  pending: "pendente",
+  allowed_once: "permitido uma vez",
+  allowed_always: "permitido sempre",
+  denied: "negado",
+  auto_allowed: "permitido por regra",
+  cancelled: "cancelado",
+};
+
 export const RUN_STATUS_LABELS: Record<RunStatus, string> = {
   running: "Em andamento",
   awaiting_input: "Aguardando resposta",
+  awaiting_permission: "Aguardando permissão",
   completed: "Concluída",
   failed: "Com erro",
   interrupted: "Interrompida",

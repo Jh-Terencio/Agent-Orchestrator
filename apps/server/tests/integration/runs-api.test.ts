@@ -278,3 +278,77 @@ describe("POST /api/runs/:id/reply e /advance", () => {
     expect(events[0]).toMatchObject({ type: "hello", activeRun: { id: run.id } });
   });
 });
+
+describe("US6: Modo Yolo e pedidos de permissão", () => {
+  const NPM_TEST = { toolName: "Bash", input: { command: "npm test" } };
+
+  /** Inicia um run cujo agente pede permissão (pela rota interna, como o relay) e espera o pedido. */
+  async function startWithRequest(): Promise<{ run: Run; events: ServerEvent[]; requestId: string }> {
+    runner.enqueue({ permissionRequests: [NPM_TEST], delayMs: 300 });
+    const events = await listen();
+    const run = RunSchema.parse((await call("POST", "/api/runs", startBody())).body);
+    const updated = await waitFor(() =>
+      events.find((event) => event.type === "run.updated" && event.run.status === "awaiting_permission"),
+    );
+    const requestId = (updated as { run: Run }).run.steps[0]!.permissionRequests[0]!.id;
+    return { run, events, requestId };
+  }
+
+  it("POST /api/runs com yolo: true grava run.yolo; sem o campo, false", async () => {
+    const yoloRes = await call("POST", "/api/runs", startBody({ yolo: true }));
+    expect(yoloRes.status).toBe(201);
+    expect(RunSchema.parse(yoloRes.body).yolo).toBe(true);
+    await server.executor.whenIdle();
+    expect(runner.invocations.at(-1)?.permissionChannel).toBeNull();
+
+    // A execução anterior deixou o repositório na branch dela.
+    const branch = await repo.git("branch", "--show-current");
+    const defaultRes = await call("POST", "/api/runs", startBody({ expectedBranch: branch }));
+    expect(defaultRes.status).toBe(201);
+    expect(RunSchema.parse(defaultRes.body).yolo).toBe(false);
+    await server.executor.whenIdle();
+    expect(runner.invocations.at(-1)?.permissionChannel).not.toBeNull();
+  });
+
+  it("decisão → 202 e o run volta a running; repetir → 409 INVALID_STATE e a CLI recebe uma só resposta", async () => {
+    const { run, events, requestId } = await startWithRequest();
+    const path = `/api/runs/${run.id}/permissions/${requestId}`;
+    const before = events.length;
+    const first = await call("POST", path, { decision: "allow_once" });
+    expect(first.status).toBe(202);
+    await waitFor(() =>
+      events.slice(before).find((event) => event.type === "run.updated" && event.run.status === "running"),
+    );
+
+    const second = await call("POST", path, { decision: "allow_once" });
+    expect(second.status).toBe(409);
+    expect(errorCode(second).code).toBe("INVALID_STATE");
+
+    await waitFor(() => events.find((event) => event.type === "run.finished"));
+    expect(runner.permissionDecisions).toEqual([{ behavior: "allow", updatedInput: NPM_TEST.input }]);
+  });
+
+  it("decisão inválida → 400; pedido inexistente → 404", async () => {
+    const { run, requestId } = await startWithRequest();
+    const bad = await call("POST", `/api/runs/${run.id}/permissions/${requestId}`, { decision: "talvez" });
+    expect(bad.status).toBe(400);
+    expect(errorCode(bad).code).toBe("VALIDATION_FAILED");
+    const missing = await call("POST", `/api/runs/${run.id}/permissions/99999999-9999-4999-8999-999999999999`, {
+      decision: "deny",
+    });
+    expect(missing.status).toBe(404);
+    expect(errorCode(missing).code).toBe("NOT_FOUND");
+    await call("POST", `/api/runs/${run.id}/permissions/${requestId}`, { decision: "deny" });
+  });
+
+  it("POST /api/runs/:id/interrupt é aceito em awaiting_permission", async () => {
+    const { run, events } = await startWithRequest();
+    const res = await call("POST", `/api/runs/${run.id}/interrupt`);
+    expect(res.status).toBe(202);
+    const finished = await waitFor(() => events.find((event) => event.type === "run.finished"));
+    expect(finished).toMatchObject({ run: { status: "interrupted" } });
+    const done = RunSchema.parse((finished as { run: Run }).run);
+    expect(done.steps[0]?.permissionRequests[0]?.status).toBe("cancelled");
+    expect(runner.permissionDecisions).toEqual([{ behavior: "deny", message: "Execução interrompida." }]);
+  });
+});

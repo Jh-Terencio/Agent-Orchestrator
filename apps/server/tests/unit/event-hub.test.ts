@@ -19,6 +19,8 @@ function makeRun(): Run {
     initialBranch: "orchestrator/20261117-120000-adicionar-login",
     createdBranches: ["orchestrator/20261117-120000-adicionar-login"],
     finalBranch: null,
+    yolo: false,
+    permissionRules: [],
     status: "running",
     startedAt: NOW,
     finishedAt: null,
@@ -36,6 +38,7 @@ function makeRun(): Run {
       finishedAt: null,
       durationMs: null,
       usage: null,
+      permissionRequests: [],
     })),
   };
 }

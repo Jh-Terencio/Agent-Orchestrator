@@ -1,9 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { ALLOWED_TOOLS, buildClaudeArgs, DISALLOWED_TOOLS } from "../../src/agent/permissions.js";
+import {
+  ALLOWED_TOOLS,
+  buildClaudeArgs,
+  DISALLOWED_TOOLS,
+  PERMISSION_TOOL,
+  YOLO_PERMISSION_MODE,
+} from "../../src/agent/permissions.js";
+import { relayCommand } from "../../src/agent/relay-path.js";
 import { NON_INTERACTIVE_SYSTEM_PROMPT } from "../../src/agent/system-prompts.js";
 
 const SESSION = "11111111-1111-4111-8111-111111111111";
-const base = { prompt: "/speckit-plan", model: "opus", sessionId: SESSION, resume: false, interactive: false };
+const CHANNEL = { url: "http://127.0.0.1:4317/internal/permission-requests", token: "t".repeat(64) };
+const RELAY = { command: "C:/node/node.exe", args: ["C:/app/permission-relay/relay.mjs"] };
+/** Modo padrão (Yolo desligado): com canal de permissão. */
+const base = {
+  prompt: "/speckit-plan",
+  model: "opus",
+  sessionId: SESSION,
+  resume: false,
+  interactive: false,
+  permissionChannel: CHANNEL,
+};
+const yolo = { ...base, permissionChannel: null };
 
 /** Valores que seguem uma flag variádica até a próxima flag. */
 function valuesAfter(args: string[], flag: string): string[] {
@@ -37,8 +55,8 @@ const FORBIDDEN = [
 ];
 
 describe("buildClaudeArgs", () => {
-  it("gera a base com prompt, stream-json, modelo e acceptEdits", () => {
-    const args = buildClaudeArgs(base);
+  it("gera a base com prompt, stream-json, modelo e acceptEdits (Yolo desligado)", () => {
+    const args = buildClaudeArgs(base, RELAY);
     expect(args.slice(0, 2)).toEqual(["-p", "/speckit-plan"]);
     expect(valueAfter(args, "--output-format")).toBe("stream-json");
     expect(args).toContain("--verbose");
@@ -70,8 +88,8 @@ describe("buildClaudeArgs", () => {
     expect(args).not.toContain("--session-id");
   });
 
-  it("--allowedTools com as ferramentas de research R3", () => {
-    expect(valuesAfter(buildClaudeArgs(base), "--allowedTools")).toEqual([
+  it("Yolo: --allowedTools com as ferramentas de research R3, inclusive Bash e PowerShell", () => {
+    expect(valuesAfter(buildClaudeArgs(yolo), "--allowedTools")).toEqual([
       "Read",
       "Edit",
       "Write",
@@ -85,14 +103,52 @@ describe("buildClaudeArgs", () => {
     expect(ALLOWED_TOOLS).toHaveLength(9);
   });
 
-  it("--disallowedTools com cada comando git proibido nas formas Bash e PowerShell", () => {
-    const denied = valuesAfter(buildClaudeArgs(base), "--disallowedTools");
+  it.each([
+    ["Yolo", yolo],
+    ["padrão", base],
+  ])("--disallowedTools com cada comando git proibido nas formas Bash e PowerShell (%s)", (_mode, invocation) => {
+    const denied = valuesAfter(buildClaudeArgs(invocation, RELAY), "--disallowedTools");
     for (const cmd of FORBIDDEN) {
       expect(denied).toContain(`Bash(${cmd}:*)`);
       expect(denied).toContain(`PowerShell(${cmd}:*)`);
     }
     expect(denied).toHaveLength(FORBIDDEN.length * 2);
     expect(DISALLOWED_TOOLS).toEqual(denied);
+  });
+
+  it("Yolo: permission-mode do Modo Yolo, sem canal MCP", () => {
+    const args = buildClaudeArgs(yolo);
+    expect(valueAfter(args, "--permission-mode")).toBe(YOLO_PERMISSION_MODE);
+    expect(YOLO_PERMISSION_MODE).toBe("bypassPermissions");
+    expect(args).not.toContain("--mcp-config");
+    expect(args).not.toContain("--permission-prompt-tool");
+    expect(args).toContain("--strict-mcp-config");
+  });
+
+  it("padrão: --allowedTools sem Bash/PowerShell e pedidos pela ferramenta do relay", () => {
+    const args = buildClaudeArgs(base, RELAY);
+    const allowed = valuesAfter(args, "--allowedTools");
+    expect(allowed).toEqual(["Read", "Edit", "Write", "Glob", "Grep", "Skill", "TodoWrite"]);
+    expect(valueAfter(args, "--permission-prompt-tool")).toBe(PERMISSION_TOOL);
+    expect(PERMISSION_TOOL).toBe("mcp__orchestrator__approve");
+    expect(args).toContain("--strict-mcp-config");
+    expect(JSON.parse(valueAfter(args, "--mcp-config") ?? "null")).toEqual({
+      mcpServers: {
+        orchestrator: {
+          command: RELAY.command,
+          args: RELAY.args,
+          env: { ORCHESTRATOR_PERMISSION_URL: CHANNEL.url, ORCHESTRATOR_PERMISSION_TOKEN: CHANNEL.token },
+        },
+      },
+    });
+  });
+
+  it("padrão sem relay explícito usa relayCommand()", () => {
+    const config = JSON.parse(valueAfter(buildClaudeArgs(base), "--mcp-config") ?? "null") as {
+      mcpServers: { orchestrator: { command: string; args: string[] } };
+    };
+    expect(config.mcpServers.orchestrator.command).toBe(relayCommand().command);
+    expect(config.mcpServers.orchestrator.args).toEqual(relayCommand().args);
   });
 
   it("--append-system-prompt se e somente se não interativo", () => {

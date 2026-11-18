@@ -223,7 +223,8 @@ button.link {
 }
 
 .step-running .step-status,
-.step-awaiting_input .step-status {
+.step-awaiting_input .step-status,
+.step-awaiting_permission .step-status {
   color: var(--accent);
 }
 
@@ -308,7 +309,8 @@ button.link {
 }
 
 .step-running .step-box-button,
-.step-awaiting_input .step-box-button {
+.step-awaiting_input .step-box-button,
+.step-awaiting_permission .step-box-button {
   border-top-color: var(--accent);
 }
 
@@ -446,4 +448,159 @@ button.danger:disabled {
 .step-interrupt-reason {
   font-size: 0.8rem;
   color: var(--warn);
+}
+
+/* Modo Yolo e pedidos de permissão (US6) */
+.yolo {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+
+.yolo-badge {
+  margin-left: 0.6rem;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--warn);
+  border-radius: 999px;
+  color: var(--warn);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.permission-prompt {
+  margin: 1rem 0;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--warn);
+  border-left-width: 4px;
+  border-radius: 6px;
+}
+
+.permission-prompt h3 {
+  margin: 0 0 0.3rem;
+}
+
+.permission-prompt .row {
+  flex-wrap: wrap;
+}
+
+.permission-summary {
+  word-break: break-all;
+}
+
+.permission-list code {
+  word-break: break-all;
+}
+
+/* US4: seletor e editor de esteiras */
+.pipeline-selector label {
+  margin: 0;
+}
+
+select,
+.pipeline-editor input:not([type="checkbox"]) {
+  font: inherit;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.pipeline-selector select {
+  min-width: 16rem;
+}
+
+.pipeline-editor-layout {
+  display: grid;
+  grid-template-columns: minmax(12rem, 16rem) 1fr;
+  gap: 1.5rem;
+  align-items: start;
+}
+
+@media (max-width: 760px) {
+  .pipeline-editor-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.pipeline-list ul {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.pipeline-list-item {
+  width: 100%;
+  text-align: left;
+}
+
+.pipeline-list-item[aria-current="true"] {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.pipeline-editor form > * + * {
+  margin-top: 1rem;
+}
+
+.pipeline-editor .field > input:not([type="checkbox"]) {
+  width: 100%;
+}
+
+.step-editor-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.step-editor {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 0.75rem;
+}
+
+.step-editor-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.step-editor-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 0.6rem 0.9rem;
+  align-items: start;
+}
+
+.step-editor-fields .field-wide {
+  grid-column: span 2;
+}
+
+.field-check {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  align-self: end;
+  padding-bottom: 0.45rem;
+}
+
+.field-check label {
+  margin: 0;
+}
+
+.field-error {
+  margin: 0.25rem 0 0;
+  font-size: 0.85rem;
+}
+
+[aria-invalid="true"] {
+  border-color: #c0392b !important;
 }

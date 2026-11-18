@@ -3,6 +3,7 @@ import {
   type ApiErrorCode,
   type ApiIssue,
   type OutputEntry,
+  type PermissionDecision,
   type Pipeline,
   type PipelineInput,
   type RepoInfo,
@@ -95,3 +96,5 @@ export const getStepOutput = (runId: string, index: number, afterSeq?: number): 
 export const reply = (runId: string, text: string): Promise<void> => request("POST", `/runs/${enc(runId)}/reply`, { text });
 export const advance = (runId: string): Promise<void> => request("POST", `/runs/${enc(runId)}/advance`);
 export const interrupt = (runId: string): Promise<void> => request("POST", `/runs/${enc(runId)}/interrupt`);
+export const decidePermission = (runId: string, requestId: string, decision: PermissionDecision): Promise<void> =>
+  request("POST", `/runs/${enc(runId)}/permissions/${enc(requestId)}`, { decision });

@@ -36,6 +36,7 @@ function stepRun(index: number, overrides: Partial<StepRun> = {}): StepRun {
     finishedAt: null,
     durationMs: null,
     usage: null,
+    permissionRequests: [],
     ...overrides,
   };
 }
@@ -52,6 +53,8 @@ function makeRun(id: string, status: RunStatus, steps: Partial<StepRun>[], finis
     initialBranch: "orchestrator/20261117-120000-adicionar-login",
     createdBranches: ["orchestrator/20261117-120000-adicionar-login"],
     finalBranch: null,
+    yolo: false,
+    permissionRules: [],
     status,
     startedAt: NOW,
     finishedAt,
@@ -92,6 +95,37 @@ describe("recoverInterruptedRuns", () => {
     expect(awaiting.steps[0]).toMatchObject({ status: "interrupted", interruptReason: "server_shutdown" });
 
     expect(await runStore.get(DONE_ID)).toEqual(terminal);
+  });
+
+  it("run em awaiting_permission vira interrupted e os pedidos pendentes viram cancelled", async () => {
+    const pending = {
+      id: "66666666-6666-4666-8666-666666666666",
+      toolUseId: "toolu_1",
+      toolName: "Bash",
+      input: { command: "npm test" },
+      summary: "Bash: npm test",
+      status: "pending" as const,
+      rule: null,
+      requestedAt: NOW,
+      decidedAt: null,
+    };
+    const decided = { ...pending, id: "77777777-7777-4777-8777-777777777777", status: "allowed_once" as const, decidedAt: NOW };
+    await runStore.save(
+      makeRun(RUNNING_ID, "awaiting_permission", [
+        { status: "awaiting_permission", startedAt: NOW, permissionRequests: [decided, pending] },
+      ]),
+    );
+
+    const clock = () => new Date("2026-11-18T08:00:00.000Z");
+    expect(await recoverInterruptedRuns(runStore, clock)).toEqual([RUNNING_ID]);
+
+    const run = await runStore.get(RUNNING_ID);
+    expect(run.status).toBe("interrupted");
+    expect(run.steps[0]).toMatchObject({ status: "interrupted", interruptReason: "server_shutdown" });
+    expect(run.steps[0]?.permissionRequests).toEqual([
+      decided,
+      { ...pending, status: "cancelled", decidedAt: "2026-11-18T08:00:00.000Z" },
+    ]);
   });
 
   it("sem runs gravados → nada a recuperar", async () => {

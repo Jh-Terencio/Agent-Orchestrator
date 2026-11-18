@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import type { Pipeline, RepoInfo } from "@orchestrator/shared";
-import { ApiClientError, getActiveRun, interrupt, listPipelines, startRun } from "../api/client";
+import { ApiClientError, getActiveRun, getSettings, interrupt, listPipelines, startRun } from "../api/client";
 import { FeatureInput } from "../components/FeatureInput";
 import { InteractiveReply } from "../components/InteractiveReply";
+import { PermissionPrompt } from "../components/PermissionPrompt";
 import { PipelineBoxes } from "../components/PipelineBoxes";
+import { initialPipelineId, PipelineSelector } from "../components/PipelineSelector";
 import { RepoPicker } from "../components/RepoPicker";
 import { RunSummary } from "../components/RunSummary";
 import { StepOutputPanel } from "../components/StepOutputPanel";
@@ -19,10 +21,13 @@ export function RunPage() {
   const [repo, setRepo] = useState<RepoInfo | null>(null);
   const [description, setDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  /** Modo Yolo (FR-027): desmarcado a cada carregamento da página. */
+  const [yolo, setYolo] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [branchNotice, setBranchNotice] = useState<string | null>(null);
-  /** Esteira mostrada antes do envio (todos os passos "aguardando"). */
-  const [previewPipeline, setPreviewPipeline] = useState<Pipeline | null>(null);
+  /** Esteiras salvas e a escolhida para o próximo envio (FR-022). */
+  const [pipelines, setPipelines] = useState<Pipeline[]>([]);
+  const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   /** `true` entre o clique em "Interromper" e o próximo `run.updated`. */
   const [interrupting, setInterrupting] = useState(false);
@@ -34,9 +39,13 @@ export function RunPage() {
 
   useEffect(() => {
     let alive = true;
-    listPipelines().then(
-      (pipelines) => alive && setPreviewPipeline(pipelines[0] ?? null),
-      (err: unknown) => console.warn("[run-page] não foi possível listar as esteiras", err),
+    Promise.all([listPipelines(), getSettings().catch(() => null)]).then(
+      ([list, settings]) => {
+        if (!alive) return;
+        setPipelines(list);
+        setPipelineId(initialPipelineId(list, settings?.lastPipelineId ?? null));
+      },
+      (err: unknown) => alive && setError(`Não foi possível listar as esteiras: ${err instanceof Error ? err.message : String(err)}`),
     );
     return () => {
       alive = false;
@@ -45,7 +54,7 @@ export function RunPage() {
 
   // Seleciona automaticamente o passo em execução (ou aguardando resposta) sempre que ele muda.
   const currentIndex = run
-    ? run.steps.findIndex((step) => step.status === "running" || step.status === "awaiting_input")
+    ? run.steps.findIndex((step) => step.status === "running" || step.status === "awaiting_input" || step.status === "awaiting_permission")
     : -1;
   useEffect(() => {
     if (currentIndex >= 0) setSelectedIndex(currentIndex);
@@ -68,8 +77,9 @@ export function RunPage() {
     };
   }, [dispatch]);
 
-  const runActive = run !== null && (run.status === "running" || run.status === "awaiting_input");
-  const canSubmit = repo !== null && repo.valid && repo.currentBranch !== null && !runActive;
+  const selectedPipeline = pipelines.find((pipeline) => pipeline.id === pipelineId) ?? null;
+  const runActive = run !== null && (run.status === "running" || run.status === "awaiting_input" || run.status === "awaiting_permission");
+  const canSubmit = repo !== null && repo.valid && repo.currentBranch !== null && !runActive && selectedPipeline !== null;
 
   const submit = async (): Promise<void> => {
     if (!repo || repo.currentBranch === null) return;
@@ -77,14 +87,14 @@ export function RunPage() {
     setError(null);
     setBranchNotice(null);
     try {
-      const pipelines = await listPipelines();
-      const pipeline = pipelines[0];
-      if (!pipeline) throw new Error("Nenhuma esteira disponível.");
+      const pipeline = selectedPipeline;
+      if (!pipeline) throw new Error("Nenhuma esteira disponível. Crie uma na aba Esteiras.");
       const started = await startRun({
         repoPath: repo.path,
         pipelineId: pipeline.id,
         description,
         expectedBranch: repo.currentBranch,
+        yolo,
       });
       dispatch({ type: "run.updated", run: started });
     } catch (err) {
@@ -136,12 +146,21 @@ export function RunPage() {
         </p>
       )}
 
+      <PipelineSelector
+        pipelines={pipelines}
+        value={pipelineId}
+        onChange={setPipelineId}
+        disabled={submitting || runActive}
+      />
+
       <FeatureInput
         value={description}
         onChange={setDescription}
         onSubmit={() => void submit()}
         canSubmit={canSubmit}
         submitting={submitting}
+        yolo={yolo}
+        onYoloChange={setYolo}
       />
       {error && (
         <p className="error" role="alert">
@@ -155,8 +174,8 @@ export function RunPage() {
         </p>
       )}
 
-      {run === null && previewPipeline && (
-        <PipelineBoxes steps={previewPipeline.steps} stepRuns={null} selectedIndex={null} onSelect={() => {}} />
+      {run === null && selectedPipeline && (
+        <PipelineBoxes steps={selectedPipeline.steps} stepRuns={null} selectedIndex={null} onSelect={() => {}} />
       )}
 
       {run && (
@@ -191,6 +210,11 @@ export function RunPage() {
               started={(run.steps[selectedIndex]?.status ?? "waiting") !== "waiting"}
             />
           )}
+
+          {runActive &&
+            run.steps.flatMap((step) => step.permissionRequests.filter((request) => request.status === "pending")).map((request) => (
+              <PermissionPrompt key={request.id} runId={run.id} request={request} />
+            ))}
 
           {awaitingStep && runActive && <InteractiveReply runId={run.id} stepName={awaitingStep.name} />}
 

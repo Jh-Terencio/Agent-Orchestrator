@@ -1,5 +1,13 @@
 import type { OutputEntry, Usage } from "@orchestrator/shared";
-import type { AgentInvocation, AgentOutcome, AgentRunner } from "../../src/agent/agent-runner.js";
+import { request } from "node:http";
+import type {
+  AgentInvocation,
+  AgentOutcome,
+  AgentRunner,
+  PermissionChannel,
+  RelayDecision,
+} from "../../src/agent/agent-runner.js";
+import type { PermissionBroker } from "../../src/execution/permission-broker.js";
 
 /** Roteiro de uma chamada do `FakeAgentRunner` (contracts/agent-runner.md, "FakeAgentRunner"). */
 export interface FakeScript {
@@ -16,6 +24,15 @@ export interface FakeScript {
   errorMessage?: string;
   usage?: Usage | null;
   sessionCostUsd?: number | null;
+  /**
+   * Pedidos de permissão enviados pelo broker (com o token de `permissionChannel`) depois das saídas e
+   * antes do atraso. Ignorados no Modo Yolo (`permissionChannel === null`).
+   */
+  permissionRequests?: Array<{ toolName: string; input: Record<string, unknown> }>;
+  /** `true` → envia todos ao mesmo tempo (`Promise.all`); senão, um depois do outro. */
+  parallelPermissions?: boolean;
+  /** `true` → envia os pedidos e não espera as decisões (simula a CLI que desiste de esperar). */
+  abandonPermissions?: boolean;
 }
 
 export type RecordedInvocation = Omit<AgentInvocation, "signal" | "onOutput" | "cwd"> & { cwd: string };
@@ -28,9 +45,16 @@ export class FakeAgentRunner implements AgentRunner {
   readonly invocations: RecordedInvocation[] = [];
   /** Cada entrada efetivamente entregue a `onOutput`, com o instante (`Date.now()`) da emissão. */
   readonly emitted: Array<{ text: string; at: number }> = [];
+  /** Decisões recebidas pelo broker, na ordem em que chegaram. */
+  readonly permissionDecisions: RelayDecision[] = [];
   private readonly queue: FakeScript[];
+  private toolUseCounter = 0;
 
-  constructor(scripts: FakeScript[] = [], private readonly fallback: FakeScript = {}) {
+  constructor(
+    scripts: FakeScript[] = [],
+    private readonly fallback: FakeScript = {},
+    private readonly broker?: PermissionBroker,
+  ) {
     this.queue = [...scripts];
   }
 
@@ -62,6 +86,7 @@ export class FakeAgentRunner implements AgentRunner {
         if (signal.aborted) break;
         emit(entry);
       }
+      await this.askPermissions(script, invocation);
       const aborted = await waitOrAbort(script.delayMs ?? 0, signal);
       if (script.sideEffect) await script.sideEffect(invocation.cwd);
       const durationMs = Date.now() - startedAt;
@@ -88,6 +113,64 @@ export class FakeAgentRunner implements AgentRunner {
       open = false;
     }
   }
+
+  /**
+   * Envia os pedidos do roteiro pelo broker ou, sem broker, por HTTP para `permissionChannel.url`, como o
+   * relay real (testes de integração).
+   */
+  private async askPermissions(script: FakeScript, invocation: AgentInvocation): Promise<void> {
+    const channel = invocation.permissionChannel;
+    const requests = script.permissionRequests ?? [];
+    if (channel === null || requests.length === 0 || invocation.signal.aborted) return;
+    const broker = this.broker;
+    const ask = (request: { toolName: string; input: Record<string, unknown> }): Promise<void> => {
+      this.toolUseCounter += 1;
+      const call = { ...request, toolUseId: `toolu_fake_${this.toolUseCounter}` };
+      const pending = broker ? broker.request(channel.token, call) : postDecision(channel, call);
+      return pending.then((decision) => {
+        this.permissionDecisions.push(decision);
+      });
+    };
+    if (script.abandonPermissions) {
+      for (const request of requests) void ask(request);
+      return;
+    }
+    if (script.parallelPermissions) {
+      await Promise.all(requests.map(ask));
+      return;
+    }
+    for (const request of requests) await ask(request);
+  }
+}
+
+/** POST do pedido na rota interna, como o relay; falha → `deny`. */
+function postDecision(channel: PermissionChannel, body: unknown): Promise<RelayDecision> {
+  return new Promise((resolve) => {
+    const payload = JSON.stringify(body);
+    const deny = (): void => resolve({ behavior: "deny", message: "falha no canal (fake)" });
+    const req = request(
+      channel.url,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(payload),
+          "x-orchestrator-token": channel.token,
+        },
+      },
+      (res) => {
+        let raw = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk: string) => (raw += chunk));
+        res.on("end", () => {
+          if (res.statusCode !== 200) return deny();
+          resolve(JSON.parse(raw) as RelayDecision);
+        });
+      },
+    );
+    req.on("error", deny);
+    req.end(payload);
+  });
 }
 
 /** Resolve `true` se o sinal for abortado antes do fim do atraso. */

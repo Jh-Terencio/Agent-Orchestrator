@@ -17,6 +17,8 @@ function makeRun(overrides: Partial<Run> = {}): Run {
     initialBranch: "orchestrator/20261117-120000-adicionar-login",
     createdBranches: ["orchestrator/20261117-120000-adicionar-login"],
     finalBranch: null,
+    yolo: false,
+    permissionRules: [],
     status: "running",
     startedAt: NOW,
     finishedAt: null,
@@ -34,6 +36,7 @@ function makeRun(overrides: Partial<Run> = {}): Run {
       finishedAt: null,
       durationMs: null,
       usage: null,
+      permissionRequests: [],
     })),
     ...overrides,
   };

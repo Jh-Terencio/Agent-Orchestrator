@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import { pathToFileURL } from "node:url";
 import type { AgentRunner } from "./agent/agent-runner.js";
 import { ClaudeCliRunner } from "./agent/claude-cli-runner.js";
+import { PermissionBroker } from "./execution/permission-broker.js";
 import { PipelineExecutor } from "./execution/pipeline-executor.js";
 import { recoverInterruptedRuns } from "./execution/recovery.js";
 import { RunLock } from "./execution/run-lock.js";
@@ -38,6 +39,7 @@ export interface RunningServer {
   settingsStore: SettingsStore;
   agentRunner: AgentRunner;
   executor: PipelineExecutor;
+  permissionBroker: PermissionBroker;
   close(): Promise<void>;
 }
 
@@ -79,11 +81,14 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
   const guard = { getPort: () => port, devPorts: options.devPorts ?? envDevPorts() };
 
   const agentRunner = options.agentRunner ?? new ClaudeCliRunner();
+  // A URL usa a porta real, lida depois do listen (porta efêmera nos testes).
+  const permissionBroker = new PermissionBroker(() => `http://${HOST}:${port}`);
   // O hub depende do http.Server, que depende do app, que depende do executor: o executor
   // recebe um encaminhador, e o hub é ligado logo abaixo.
   let hubRef: EventHub | null = null;
   const executor = new PipelineExecutor({
     agentRunner,
+    permissionBroker,
     runStore,
     settingsStore,
     eventHub: {
@@ -93,7 +98,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     lock: new RunLock(),
   });
 
-  const app = createApp({ ...guard, pipelineStore, runStore, settingsStore, executor });
+  const app = createApp({ ...guard, pipelineStore, runStore, settingsStore, executor, permissionBroker });
   const server = createServer(app);
   const hub = new EventHub(server, {
     isAllowed: (req) => isAllowedRequest(req, guard),
@@ -119,6 +124,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     settingsStore,
     agentRunner,
     executor,
+    permissionBroker,
     async close() {
       await hub.close();
       server.closeAllConnections();

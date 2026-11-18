@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import type { AgentInvocation, AgentOutcome, AgentRunner } from "./agent-runner.js";
 import { killProcessTree } from "./kill-tree.js";
-import { buildClaudeArgs } from "./permissions.js";
+import { buildClaudeArgs, PERMISSION_ENV } from "./permissions.js";
 import { CLAUDE_NOT_FOUND_MESSAGE, resolveClaudeCommand, systemResolveDeps, type ResolvedClaude } from "./resolve-claude.js";
 import { createStreamJsonParser } from "./stream-json-parser.js";
 

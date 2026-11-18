@@ -7,12 +7,14 @@ export interface PipelineBoxesProps {
   stepRuns: readonly StepRun[] | null;
   selectedIndex: number | null;
   onSelect: (index: number) => void;
+  /** Nome acessível da lista. Padrão: "Passos da execução". */
+  label?: string;
 }
 
 /** Sequência horizontal de caixas, uma por passo da esteira. */
-export function PipelineBoxes({ steps, stepRuns, selectedIndex, onSelect }: PipelineBoxesProps) {
+export function PipelineBoxes({ steps, stepRuns, selectedIndex, onSelect, label = "Passos da execução" }: PipelineBoxesProps) {
   return (
-    <ol className="pipeline-boxes" aria-label="Passos da execução">
+    <ol className="pipeline-boxes" aria-label={label}>
       {steps.map((step, index) => (
         <StepBox
           key={step.id}

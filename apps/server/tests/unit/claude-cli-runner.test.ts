@@ -41,6 +41,7 @@ function invocation(signal: AbortSignal, outputs: string[]): AgentInvocation {
     resume: false,
     interactive: false,
     priorSessionCostUsd: 0,
+    permissionChannel: null,
     signal,
     onOutput: (entry) => outputs.push(entry.text),
   };

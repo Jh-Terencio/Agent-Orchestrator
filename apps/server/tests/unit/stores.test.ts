@@ -48,6 +48,8 @@ function validRun(id = "11111111-1111-4111-8111-111111111111"): Run {
     initialBranch: "orchestrator/20261117-120000-adicionar-login",
     createdBranches: ["orchestrator/20261117-120000-adicionar-login"],
     finalBranch: null,
+    yolo: false,
+    permissionRules: [],
     status: "running",
     startedAt: NOW,
     finishedAt: null,
@@ -65,6 +67,7 @@ function validRun(id = "11111111-1111-4111-8111-111111111111"): Run {
       finishedAt: null,
       durationMs: null,
       usage: null,
+      permissionRequests: [],
     })),
   };
 }

@@ -12,6 +12,7 @@ import {
 } from "@orchestrator/shared";
 import { buildRunBranchName } from "../../src/git/branch-name.js";
 import { ApiError } from "../../src/http/errors.js";
+import { PermissionBroker } from "../../src/execution/permission-broker.js";
 import { PipelineExecutor } from "../../src/execution/pipeline-executor.js";
 import { RunLock } from "../../src/execution/run-lock.js";
 import { RunStore } from "../../src/storage/run-store.js";
@@ -31,6 +32,7 @@ let events: ServerEvent[];
 let pushed: Array<{ runId: string; stepIndex: number; entry: OutputEntry }>;
 let lock: RunLock;
 let runner: FakeAgentRunner;
+let broker: PermissionBroker;
 let executor: PipelineExecutor;
 let fileCounter = 0;
 
@@ -51,9 +53,11 @@ const usage = (costUsd: number | null, extra: Partial<Usage> = {}): Usage => ({
 });
 
 function makeExecutor(scripts: FakeScript[] = [], fallback: FakeScript = { sideEffect: writesFile }, clock?: () => Date) {
-  runner = new FakeAgentRunner(scripts, fallback);
+  broker = new PermissionBroker(() => "http://127.0.0.1:1");
+  runner = new FakeAgentRunner(scripts, fallback, broker);
   executor = new PipelineExecutor({
     agentRunner: runner,
+    permissionBroker: broker,
     runStore,
     settingsStore,
     eventHub: {
@@ -85,12 +89,16 @@ function twoStepPipeline(overrides: Partial<Pipeline["steps"][number]>[] = []): 
   return { ...base, id: "22222222-2222-4222-8222-222222222222", isDefault: false, name: "Duas etapas", steps };
 }
 
-async function start(pipeline: Pipeline, overrides: { expectedBranch?: string; description?: string } = {}): Promise<Run> {
+async function start(
+  pipeline: Pipeline,
+  overrides: { expectedBranch?: string; description?: string; yolo?: boolean } = {},
+): Promise<Run> {
   return executor.start({
     repoPath: repo.path,
     pipeline,
     description: overrides.description ?? DESCRIPTION,
     expectedBranch: overrides.expectedBranch ?? "main",
+    yolo: overrides.yolo ?? false,
   });
 }
 
@@ -205,6 +213,19 @@ describe("PipelineExecutor (US1): validação na partida", () => {
     await executor.whenIdle();
     expect(executor.getActiveRun()?.status).toBe("awaiting_input");
     await expectApiError(start(pipeline), 409, "RUN_ALREADY_ACTIVE");
+  });
+
+  it("esteira inválida → PIPELINE_INVALID com issues, sem criar branch nem ocupar o lock (FR-024)", async () => {
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const invalid = { ...pipeline, steps: [{ ...pipeline.steps[0]!, timeoutMinutes: 0 }] };
+    const error = await expectApiError(start(invalid), 422, "PIPELINE_INVALID");
+    expect(error.issues).toContainEqual({
+      path: ["steps", 0, "timeoutMinutes"],
+      message: "O limite de tempo deve estar entre 1 e 1440 minutos",
+    });
+    expect(await repo.git("branch", "--list", "orchestrator/*")).toBe("");
+    expect(lock.activeRunId).toBeNull();
   });
 });
 
@@ -855,5 +876,249 @@ describe("PipelineExecutor (US3): shutdown", () => {
     makeExecutor();
     await expect(executor.shutdown()).resolves.toBeUndefined();
     expect(events).toHaveLength(0);
+  });
+});
+
+describe("PipelineExecutor (US6): permissões e Modo Yolo", () => {
+  const NPM_TEST = { toolName: "Bash", input: { command: "npm test", description: "roda os testes" } };
+
+  afterEach(async () => {
+    await executor.shutdown();
+    vi.useRealTimers();
+  });
+
+  /** Pedidos do 1º passo no run em memória. */
+  const requests = () => executor.getActiveRun()?.steps[0]?.permissionRequests ?? [];
+  const pendingIds = () => requests().filter((request) => request.status === "pending").map((request) => request.id);
+  const systemTexts = async (runId: string) =>
+    (await runStore.readOutput(runId, 0)).filter((entry) => entry.kind === "system").map((entry) => entry.text);
+
+  it("Yolo: invocação sem canal de permissão e nenhum pedido criado", async () => {
+    makeExecutor([{ permissionRequests: [NPM_TEST] }]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline, { yolo: true });
+    expect(run.yolo).toBe(true);
+    await executor.whenIdle();
+    expect(runner.invocations[0]?.permissionChannel).toBeNull();
+    const done = await runStore.get(run.id);
+    expect(done.status).toBe("completed");
+    expect(done.steps.flatMap((step) => step.permissionRequests)).toEqual([]);
+    expect(runner.permissionDecisions).toEqual([]);
+  });
+
+  it("sem Yolo: cada invocação recebe um canal próprio, fechado ao terminar", async () => {
+    makeExecutor();
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    expect(run.yolo).toBe(false);
+    await executor.whenIdle();
+    const channels = runner.invocations.map((invocation) => invocation.permissionChannel);
+    expect(channels).toHaveLength(2);
+    expect(channels[0]?.url).toBe("http://127.0.0.1:1/internal/permission-requests");
+    expect(channels[0]?.token).not.toBe(channels[1]?.token);
+    for (const channel of channels) expect(broker.hasChannel(channel!.token)).toBe(false);
+  });
+
+  it("pedido → passo e run awaiting_permission; allow_once → fake recebe allow, passo volta a running e conclui", async () => {
+    makeExecutor([{ permissionRequests: [NPM_TEST], sideEffect: writesFile }]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await until(() => pendingIds().length === 1);
+
+    const active = executor.getActiveRun()!;
+    expect(active.status).toBe("awaiting_permission");
+    expect(active.steps[0]?.status).toBe("awaiting_permission");
+    expect(active.steps[0]?.permissionRequests[0]).toMatchObject({
+      status: "pending",
+      toolName: "Bash",
+      input: NPM_TEST.input,
+      summary: "Bash: npm test",
+      rule: null,
+      decidedAt: null,
+    });
+    // O run.updated sai depois da gravação do run.json.
+    await until(() => events.some((event) => event.type === "run.updated" && event.run.status === "awaiting_permission"));
+    expect((await runStore.get(run.id)).status).toBe("awaiting_permission");
+
+    await executor.decidePermission(run.id, pendingIds()[0]!, "allow_once");
+    await executor.whenIdle();
+
+    expect(runner.permissionDecisions).toEqual([{ behavior: "allow", updatedInput: NPM_TEST.input }]);
+    const done = await runStore.get(run.id);
+    expect(done.status).toBe("completed");
+    expect(done.steps[0]?.permissionRequests[0]).toMatchObject({ status: "allowed_once", rule: null });
+    expect(done.steps[0]?.permissionRequests[0]?.decidedAt).not.toBeNull();
+    const texts = await systemTexts(run.id);
+    expect(texts).toContain("Permissão pedida: Bash: npm test");
+    expect(texts).toContain("Permitido uma vez: Bash: npm test");
+  });
+
+  it("allow_always cria a regra; um pedido seguinte com o mesmo prefixo vira auto_allowed sem pausar", async () => {
+    const again = { toolName: "Bash", input: { command: "npm test -- --run" } };
+    makeExecutor([{ permissionRequests: [NPM_TEST, again] }]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await until(() => pendingIds().length === 1);
+    const before = events.length;
+
+    await executor.decidePermission(run.id, pendingIds()[0]!, "allow_always");
+    await executor.whenIdle();
+    const statuses = events.slice(before).flatMap((event) => ("run" in event && event.run ? [event.run.status] : []));
+
+    const done = await runStore.get(run.id);
+    expect(done.permissionRules).toEqual(["Bash(npm test:*)"]);
+    expect(done.steps[0]?.permissionRequests.map((request) => [request.status, request.rule])).toEqual([
+      ["allowed_always", "Bash(npm test:*)"],
+      ["auto_allowed", "Bash(npm test:*)"],
+    ]);
+    expect(runner.permissionDecisions).toEqual([
+      { behavior: "allow", updatedInput: NPM_TEST.input },
+      { behavior: "allow", updatedInput: again.input },
+    ]);
+    // Depois da decisão, o passo não voltou a pausar.
+    expect(statuses).not.toContain("awaiting_permission");
+    expect(await systemTexts(run.id)).toContain("Permitido sempre: Bash(npm test:*)");
+  });
+
+  it("deny → fake recebe deny com a mensagem do orquestrador", async () => {
+    makeExecutor([{ permissionRequests: [NPM_TEST] }]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await until(() => pendingIds().length === 1);
+    await executor.decidePermission(run.id, pendingIds()[0]!, "deny");
+    await executor.whenIdle();
+    expect(runner.permissionDecisions).toEqual([{ behavior: "deny", message: "Negado pelo usuário no orquestrador." }]);
+    const done = await runStore.get(run.id);
+    expect(done.steps[0]?.permissionRequests[0]?.status).toBe("denied");
+    expect(await systemTexts(run.id)).toContain("Negado: Bash: npm test");
+  });
+
+  it("dois pedidos em paralelo: o passo só volta a running depois de decidir os dois", async () => {
+    const other = { toolName: "Bash", input: { command: "make build" } };
+    makeExecutor([{ permissionRequests: [NPM_TEST, other], parallelPermissions: true, delayMs: LONG }]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await until(() => pendingIds().length === 2);
+    const [first, second] = pendingIds();
+
+    await executor.decidePermission(run.id, first!, "allow_once");
+    expect(executor.getActiveRun()?.status).toBe("awaiting_permission");
+    expect(executor.getActiveRun()?.steps[0]?.status).toBe("awaiting_permission");
+
+    await executor.decidePermission(run.id, second!, "deny");
+    expect(executor.getActiveRun()?.status).toBe("running");
+    expect(executor.getActiveRun()?.steps[0]?.status).toBe("running");
+    await until(() => runner.permissionDecisions.length === 2);
+  });
+
+  it("o tempo esperando a decisão não conta para o limite do passo", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    makeExecutor([
+      {
+        outputs: [
+          { kind: "text", text: "trabalhando" },
+          { kind: "text", text: "preciso rodar os testes" },
+        ],
+        outputIntervalMs: 30_000,
+        permissionRequests: [NPM_TEST],
+        delayMs: LONG,
+      },
+    ]);
+    const pipeline = twoStepPipeline([{ timeoutMinutes: 1 }]);
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await until(() => runner.invocations.length === 1);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await until(() => pendingIds().length === 1);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    await settle();
+    expect(executor.getActiveRun()?.steps[0]?.status).toBe("awaiting_permission");
+
+    await executor.decidePermission(run.id, pendingIds()[0]!, "allow_once");
+    await vi.advanceTimersByTimeAsync(29_000);
+    await settle();
+    expect(executor.getActiveRun()?.steps[0]?.status).toBe("running");
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await until(() => executor.getActiveRun() === null);
+    const done = await runStore.get(run.id);
+    expect(done.steps[0]).toMatchObject({ status: "interrupted", interruptReason: "timeout" });
+  });
+
+  it("interromper com pedido pendente: fake recebe deny, pedido cancelled, passo interrupted (user)", async () => {
+    makeExecutor([{ permissionRequests: [NPM_TEST], delayMs: LONG }]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await until(() => pendingIds().length === 1);
+
+    await executor.interrupt(run.id);
+    await executor.whenIdle();
+
+    expect(runner.permissionDecisions).toEqual([{ behavior: "deny", message: "Execução interrompida." }]);
+    const done = await runStore.get(run.id);
+    expect(done.status).toBe("interrupted");
+    expect(done.steps[0]).toMatchObject({ status: "interrupted", interruptReason: "user" });
+    expect(done.steps[0]?.permissionRequests[0]?.status).toBe("cancelled");
+    expect(done.steps[1]?.status).toBe("waiting");
+    expect(lock.activeRunId).toBeNull();
+  });
+
+  it("shutdown com pedido pendente → interrupted (server_shutdown) e pedido cancelled", async () => {
+    makeExecutor([{ permissionRequests: [NPM_TEST], delayMs: LONG }]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await until(() => pendingIds().length === 1);
+    await executor.shutdown();
+    const done = await runStore.get(run.id);
+    expect(done.steps[0]).toMatchObject({ status: "interrupted", interruptReason: "server_shutdown" });
+    expect(done.steps[0]?.permissionRequests[0]?.status).toBe("cancelled");
+  });
+
+  it("decidir duas vezes o mesmo pedido → a segunda lança 409 INVALID_STATE e a CLI recebe uma só decisão", async () => {
+    makeExecutor([{ permissionRequests: [NPM_TEST], delayMs: LONG }]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await until(() => pendingIds().length === 1);
+    const id = pendingIds()[0]!;
+    await executor.decidePermission(run.id, id, "allow_once");
+    await expectApiError(executor.decidePermission(run.id, id, "allow_once"), 409, "INVALID_STATE");
+    await until(() => runner.permissionDecisions.length === 1);
+    await settle();
+    expect(runner.permissionDecisions).toHaveLength(1);
+  });
+
+  it("decidePermission com pedido ou execução inexistente → 404", async () => {
+    makeExecutor([{ permissionRequests: [NPM_TEST], delayMs: LONG }]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await until(() => pendingIds().length === 1);
+    const missing = "99999999-9999-4999-8999-999999999999";
+    await expectApiError(executor.decidePermission(run.id, missing, "deny"), 404, "NOT_FOUND");
+    await expectApiError(executor.decidePermission(missing, pendingIds()[0]!, "deny"), 404, "NOT_FOUND");
+  });
+
+  it("invocação que termina com pedido pendente (a CLI desistiu) → pedido cancelled e o passo segue", async () => {
+    makeExecutor([{ permissionRequests: [NPM_TEST], abandonPermissions: true }]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await executor.whenIdle();
+    const done = await runStore.get(run.id);
+    expect(done.status).toBe("completed");
+    expect(done.steps[0]?.permissionRequests[0]?.status).toBe("cancelled");
+    expect(await systemTexts(run.id)).toContain(
+      "Pedido de permissão cancelado (A CLI desistiu de esperar pela decisão): Bash: npm test",
+    );
   });
 });

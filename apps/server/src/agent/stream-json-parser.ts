@@ -1,5 +1,5 @@
 import { StringDecoder } from "node:string_decoder";
-import type { OutputEntry, Usage } from "@orchestrator/shared";
+import { summarizeToolInput, type OutputEntry, type Usage } from "@orchestrator/shared";
 
 export type ParsedEntry = Omit<OutputEntry, "seq" | "at">;
 
@@ -38,22 +38,6 @@ const isObject = (value: unknown): value is Json => typeof value === "object" &&
 const num = (value: unknown): number | null => (typeof value === "number" && Number.isFinite(value) ? value : null);
 const str = (value: unknown): string | null => (typeof value === "string" ? value : null);
 
-const SUMMARY_MAX = 200;
-
-/** Resumo de uma chamada de ferramenta: o campo mais informativo da entrada. */
-function summarizeToolInput(input: unknown): string {
-  if (!isObject(input)) return "";
-  for (const key of ["command", "file_path", "path", "pattern", "skill", "url", "description"]) {
-    const value = str(input[key]);
-    if (value) return truncate(value);
-  }
-  return truncate(JSON.stringify(input));
-}
-
-function truncate(text: string): string {
-  const oneLine = text.replace(/\s+/g, " ").trim();
-  return oneLine.length > SUMMARY_MAX ? `${oneLine.slice(0, SUMMARY_MAX - 1)}…` : oneLine;
-}
 
 function toolResultText(content: unknown): string {
   if (typeof content === "string") return content;

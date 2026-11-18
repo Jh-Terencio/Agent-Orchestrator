@@ -1,10 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { createDefaultPipeline } from "../src/default-pipeline.js";
-import { ApiErrorSchema, ReplyRequestSchema, RunSummarySchema, StartRunRequestSchema } from "../src/schemas/api.js";
+import {
+  ApiErrorSchema,
+  PermissionDecisionRequestSchema,
+  ReplyRequestSchema,
+  RunSummarySchema,
+  StartRunRequestSchema,
+} from "../src/schemas/api.js";
 import { ServerEventSchema } from "../src/schemas/events.js";
 import {
   InvocationSchema,
   OutputEntrySchema,
+  PermissionRequestSchema,
   RepoInfoSchema,
   RunSchema,
   RunStatusSchema,
@@ -331,5 +338,66 @@ describe("ApiErrorSchema", () => {
 
   it("rejeita código desconhecido", () => {
     expect(ApiErrorSchema.safeParse({ error: { code: "BOOM", message: "m" } }).success).toBe(false);
+  });
+});
+
+describe("US6: permissões e Modo Yolo", () => {
+  const request = {
+    id: "66666666-6666-4666-8666-666666666666",
+    toolUseId: "toolu_1",
+    toolName: "Bash",
+    input: { command: "npm test" },
+    summary: "Bash: npm test",
+    status: "pending",
+    rule: null,
+    requestedAt: T0,
+    decidedAt: null,
+  };
+
+  it("run.json antigo, sem yolo/permissionRules/permissionRequests, recebe os padrões", () => {
+    const parsed = RunSchema.parse(validRun());
+    expect(parsed.yolo).toBe(false);
+    expect(parsed.permissionRules).toEqual([]);
+    for (const step of parsed.steps) expect(step.permissionRequests).toEqual([]);
+  });
+
+  it("aceita awaiting_permission no passo e no run", () => {
+    expect(StepStatusSchema.safeParse("awaiting_permission").success).toBe(true);
+    expect(RunStatusSchema.safeParse("awaiting_permission").success).toBe(true);
+  });
+
+  it("aceita Run com yolo, regras e pedidos", () => {
+    const run = validRun({ yolo: true, permissionRules: ["Bash(npm test:*)"] });
+    (run.steps as Array<Record<string, unknown>>)[1]!.permissionRequests = [
+      request,
+      { ...request, id: "77777777-7777-4777-8777-777777777777", status: "allowed_always", rule: "Bash(npm test:*)", decidedAt: T1 },
+    ];
+    const result = RunSchema.safeParse(run);
+    expect(result.success ? [] : result.error.issues).toEqual([]);
+  });
+
+  it("rejeita status de pedido desconhecido", () => {
+    expect(PermissionRequestSchema.safeParse({ ...request, status: "maybe" }).success).toBe(false);
+    for (const status of ["pending", "allowed_once", "allowed_always", "denied", "auto_allowed", "cancelled"]) {
+      expect(PermissionRequestSchema.safeParse({ ...request, status }).success).toBe(true);
+    }
+  });
+
+  it("StartRunRequest sem yolo → false; com yolo → true", () => {
+    const base = {
+      repoPath: "C:/repos/app",
+      pipelineId: RUN_ID,
+      description: "x",
+      expectedBranch: "main",
+    };
+    expect(StartRunRequestSchema.parse(base).yolo).toBe(false);
+    expect(StartRunRequestSchema.parse({ ...base, yolo: true }).yolo).toBe(true);
+  });
+
+  it("PermissionDecisionRequest aceita só as três decisões", () => {
+    for (const decision of ["allow_once", "allow_always", "deny"]) {
+      expect(PermissionDecisionRequestSchema.safeParse({ decision }).success).toBe(true);
+    }
+    expect(PermissionDecisionRequestSchema.safeParse({ decision: "talvez" }).success).toBe(false);
   });
 });

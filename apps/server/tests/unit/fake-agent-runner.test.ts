@@ -11,6 +11,7 @@ function invocation(signal: AbortSignal, onOutput: AgentInvocation["onOutput"] =
     resume: false,
     interactive: false,
     priorSessionCostUsd: 0,
+    permissionChannel: null,
     signal,
     onOutput,
   };

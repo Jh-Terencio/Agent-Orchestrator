@@ -25,6 +25,11 @@ const STEP_TABLE: Row[] = [
   ["awaiting_input", "ref_violation", "any", "failed"],
   ["awaiting_input", "interrupt", "any", "interrupted"],
   ["awaiting_input", "shutdown", "any", "interrupted"],
+  ["running", "permission_request", "any", "awaiting_permission"],
+  ["awaiting_permission", "permission_request", "any", "awaiting_permission"],
+  ["awaiting_permission", "permission_decision", "any", "running"],
+  ["awaiting_permission", "interrupt", "any", "interrupted"],
+  ["awaiting_permission", "shutdown", "any", "interrupted"],
 ];
 
 function expected(from: StepStatus, event: StepEvent, interactive: boolean): StepStatus | undefined {
@@ -69,6 +74,12 @@ describe("transitionStep", () => {
     expect(() => transitionStep("awaiting_input", "timeout", { interactive: true })).toThrow(InvalidTransition);
   });
 
+  it("em awaiting_permission, timeout, reply, advance e agent_success são inválidos (timer pausado)", () => {
+    for (const event of ["timeout", "reply", "advance", "agent_success", "agent_error"] as const) {
+      expect(() => transitionStep("awaiting_permission", event, { interactive: true })).toThrow(InvalidTransition);
+    }
+  });
+
   it("qualquer evento em estado terminal é inválido", () => {
     for (const from of ["completed", "failed", "interrupted"] as const) {
       for (const event of STEP_EVENTS) {
@@ -93,6 +104,10 @@ const RUN_TABLE: RunRow[] = [
   ["awaiting_input", "failed", "any", "failed"],
   ["running", "interrupted", "any", "interrupted"],
   ["awaiting_input", "interrupted", "any", "interrupted"],
+  ["running", "awaiting_permission", "any", "awaiting_permission"],
+  ["awaiting_permission", "awaiting_permission", "any", "awaiting_permission"],
+  ["awaiting_permission", "running", "any", "running"],
+  ["awaiting_permission", "interrupted", "any", "interrupted"],
 ];
 
 describe("transitionRun", () => {

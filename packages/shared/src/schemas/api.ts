@@ -37,6 +37,8 @@ export const StartRunRequestSchema = z.object({
   pipelineId: z.uuid(),
   description: z.string().refine((value) => value.trim().length > 0, "Descreva a feature antes de enviar"),
   expectedBranch: z.string().min(1, "Informe a branch esperada"),
+  /** Modo Yolo (FR-027): desligado por padrão. */
+  yolo: z.boolean().default(false),
 });
 export type StartRunRequest = z.infer<typeof StartRunRequestSchema>;
 
@@ -44,6 +46,14 @@ export const ReplyRequestSchema = z.object({
   text: z.string().refine((value) => value.trim().length > 0, "Escreva uma resposta"),
 });
 export type ReplyRequest = z.infer<typeof ReplyRequestSchema>;
+
+export const PermissionDecisionSchema = z.enum(["allow_once", "allow_always", "deny"]);
+export type PermissionDecision = z.infer<typeof PermissionDecisionSchema>;
+
+export const PermissionDecisionRequestSchema = z.object({
+  decision: PermissionDecisionSchema,
+});
+export type PermissionDecisionRequest = z.infer<typeof PermissionDecisionRequestSchema>;
 
 export const RunSummarySchema = z.object({
   id: z.uuid(),

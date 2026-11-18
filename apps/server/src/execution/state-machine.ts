@@ -11,6 +11,10 @@ export const STEP_EVENTS = [
   "shutdown",
   "reply",
   "advance",
+  /** Pedido de permissão do agente (US6): pausa o passo até a decisão. */
+  "permission_request",
+  /** Decisão do último pedido pendente: o passo volta a executar. */
+  "permission_decision",
 ] as const;
 export type StepEvent = (typeof STEP_EVENTS)[number];
 
@@ -39,6 +43,22 @@ export function transitionStep(status: StepStatus, event: StepEvent, options: { 
           return "failed";
         case "interrupt":
         case "timeout":
+        case "shutdown":
+          return "interrupted";
+        case "permission_request":
+          return "awaiting_permission";
+        default:
+          break;
+      }
+      break;
+    case "awaiting_permission":
+      // O timer está pausado: `timeout` não ocorre aqui (FR-032). O processo continua vivo, esperando.
+      switch (event) {
+        case "permission_request":
+          return "awaiting_permission";
+        case "permission_decision":
+          return "running";
+        case "interrupt":
         case "shutdown":
           return "interrupted";
         default:
@@ -73,12 +93,28 @@ export function transitionStep(status: StepStatus, event: StepEvent, options: { 
  * `isLastStep` decide se um passo `completed` encerra a execução ou leva ao próximo passo.
  */
 export function transitionRun(status: RunStatus, stepStatus: StepStatus, options: { isLastStep: boolean }): RunStatus {
+  if (status === "awaiting_permission") {
+    switch (stepStatus) {
+      case "running":
+        return "running";
+      case "awaiting_permission":
+        return "awaiting_permission";
+      case "interrupted":
+        return "interrupted";
+      default:
+        break;
+    }
+    throw new InvalidTransition(status, `step:${stepStatus}`);
+  }
   if (status === "running" || status === "awaiting_input") {
     switch (stepStatus) {
       case "running":
         return "running";
       case "awaiting_input":
         if (status === "running") return "awaiting_input";
+        break;
+      case "awaiting_permission":
+        if (status === "running") return "awaiting_permission";
         break;
       case "completed":
         return options.isLastStep ? "completed" : "running";
