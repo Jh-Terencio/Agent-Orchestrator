@@ -64,8 +64,10 @@ Opus fica só no Plan, onde o raciocínio pesa mais, e Sonnet nos demais passos,
 | `status` | `RunStatus` | ver máquina de estados |
 | `startedAt` / `finishedAt` | ISO datetime / null | |
 | `steps` | `StepRun[]` | um por passo da esteira copiada, na mesma ordem |
+| `yolo` | boolean | Modo Yolo escolhido no envio (FR-027); `.default(false)`, para `run.json` antigos continuarem válidos |
+| `permissionRules` | string[] | regras de "permitir sempre nesta execução" (FR-029), ex.: `Bash(npm test:*)`; `.default([])` |
 
-`RunStatus` = `running` · `awaiting_input` · `completed` · `failed` · `interrupted`
+`RunStatus` = `running` · `awaiting_input` · `awaiting_permission` · `completed` · `failed` · `interrupted`
 
 ## 4. StepRun (Execução de Passo): embutido em `Run.steps`
 
@@ -83,6 +85,22 @@ Opus fica só no Plan, onde o raciocínio pesa mais, e Sonnet nos demais passos,
 | `startedAt` / `finishedAt` | ISO / null | |
 | `durationMs` | number \| null | soma do tempo de trabalho do agente (exclui a pausa) |
 | `usage` | `Usage \| null` | soma das `invocations[].usage` |
+| `permissionRequests` | `PermissionRequest[]` | pedidos de permissão do passo, em ordem (FR-028/FR-030); `.default([])` |
+
+**PermissionRequest** (FR-028–FR-031, research R13):
+
+| Campo | Tipo | Notas |
+|---|---|---|
+| `id` | uuid | gerado pelo orquestrador |
+| `toolUseId` | string | id da chamada na CLI |
+| `toolName` | string | ex.: `Bash` |
+| `input` | `Record<string, unknown>` | entrada bruta da ferramenta (ex.: `{ command, description }`) |
+| `summary` | string | texto exibido, no formato do `tool_use` (ex.: `Bash: npm test`) |
+| `status` | `pending` · `allowed_once` · `allowed_always` · `denied` · `auto_allowed` · `cancelled` | `auto_allowed` = casou com uma regra de `Run.permissionRules`; `cancelled` = interrupção, shutdown ou desistência da CLI |
+| `rule` | string \| null | regra criada por `allowed_always` |
+| `requestedAt` / `decidedAt` | ISO / null | |
+
+Cada pedido e cada decisão também geram uma `OutputEntry` `system` no passo (ex.: "Permissão pedida: Bash: npm test", "Permitido sempre: Bash(npm test:*)").
 
 **Invocation**: `{ prompt: string, startedAt, finishedAt, durationMs, outcome: "success" | "error" | "interrupted", usage: Usage | null, sessionCostUsd: number | null }`. `prompt` é o texto exato enviado ao agente nessa invocação (comando + descrição na inicial, a resposta do usuário nas seguintes), registrado como a **entrada** do passo (FR-016, Princípio VI). `sessionCostUsd` é o `total_cost_usd` bruto do `result`, **acumulado na sessão** (research R1). Ele não é exibido nem somado: serve só de base (`priorSessionCostUsd`) para calcular o custo da próxima invocação da mesma sessão quando a CLI não reportar `model_usage_since_last_result`. Fica `null` quando a invocação não emitiu `result`.
 
@@ -130,6 +148,8 @@ Implementação pura em `apps/server/src/execution/state-machine.ts`:
                      │ interrupt / timeout / shutdown                │
                      └──────────────────────► interrupted ◄──────────┘  interrupt / shutdown
            awaiting_input ── reply ──► running   (mesma sessão, limite de tempo completo)
+           running ── permission_request ──► awaiting_permission ── permission_decision ──► running   (timer pausado; US6)
+           awaiting_permission ── interrupt / shutdown ──► interrupted
 ```
 
 | De | Evento | Para | Efeitos colaterais (executor) |
@@ -144,6 +164,12 @@ Implementação pura em `apps/server/src/execution/state-machine.ts`:
 | awaiting_input | `advance` | completed | verificação de refs (passou), commit "concluído" |
 | awaiting_input | `ref_violation` (verificação ao avançar falhou) | failed | **nenhum commit**; mensagem lista as refs afetadas |
 | awaiting_input | `interrupt` / `shutdown` | interrupted | verificação de refs; commit WIP se ela passar. Se falhar: continua `interrupted`, nenhum commit, violação em `errorMessage` |
+| running | `permission_request` | awaiting_permission | registra o `PermissionRequest` `pending`; **pausa** o timer (FR-032); o processo do agente continua vivo, esperando |
+| awaiting_permission | `permission_request` | awaiting_permission | outro pedido simultâneo entra na fila |
+| awaiting_permission | `permission_decision` (sem pendentes restantes) | running | responde à CLI; **retoma** o timer com o tempo restante |
+| awaiting_permission | `interrupt` / `shutdown` | interrupted | pendentes viram `cancelled` e a CLI recebe `deny`; depois, o mesmo caminho de `running` → `interrupted` (encerra a árvore de processos, verificação de refs, commit WIP) |
+
+Em `awaiting_permission`, `timeout` **não** ocorre (o timer está pausado), e `reply`, `advance`, `agent_success` e `agent_error` são inválidos. Uma decisão que deixa outros pedidos pendentes mantém o passo em `awaiting_permission`.
 
 A verificação de refs acontece **sempre** que um passo sai de `running` (inclusive em erro ou interrupção), ao interromper em `awaiting_input`, e de novo antes do commit ao avançar. Ela compara o estado atual com `refSnapshot`:
 
@@ -164,5 +190,8 @@ Se a verificação falhar, nada é commitado. Ao sair de `running` por sucesso/e
 | running | passo → failed | **failed** (passos restantes ficam `waiting`) |
 | awaiting_input | passo → failed (`ref_violation` ao avançar) | **failed** (passos restantes ficam `waiting`) |
 | running / awaiting_input | passo → interrupted | **interrupted** (passos restantes ficam `waiting`) |
+| running | passo → awaiting_permission | awaiting_permission |
+| awaiting_permission | passo → running (todos os pedidos decididos) | running |
+| awaiting_permission | passo → interrupted | **interrupted** (passos restantes ficam `waiting`) |
 
 Ao entrar num estado terminal, o executor grava `finishedAt` e `finalBranch` (branch ativa) e libera a trava de execução única (FR-012).

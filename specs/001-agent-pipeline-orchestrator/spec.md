@@ -75,6 +75,25 @@ A qualquer momento durante a execução, o usuário pode clicar em interromper. 
 
 ---
 
+### User Story 6 - Decidir permissões do agente ou rodar em Modo Yolo (Priority: P2)
+
+Por padrão, quando o agente quer executar um comando na máquina, a esteira pausa e mostra o pedido; o usuário decide na hora se permite uma vez, permite sempre nesta execução ou nega, e o agente continua de onde parou. Se o usuário quiser que o agente faça o que precisar sem perguntar, marca o checkbox "Modo Yolo" antes de enviar; ele vem desmarcado.
+
+**Why this priority**: O agente roda comandos reais na máquina do usuário. Sem controle, qualquer comando roda sem ninguém olhando; com o controle, o usuário escolhe quanto confia em cada execução (constituição, Segurança do Código Alvo e Transparência em Tempo Real).
+
+**Independent Test**: Com o Modo Yolo desmarcado, executar um passo que roda um comando de shell, verificar que o pedido aparece e que o comando só roda depois de permitido; repetir negando e verificar que o comando não roda; repetir com o Modo Yolo marcado e verificar que nenhum pedido aparece.
+
+**Acceptance Scenarios**:
+
+1. **Given** o Modo Yolo desmarcado e um passo em execução, **When** o agente pede para rodar um comando que a ferramenta de agente não aprova sozinha, **Then** o passo fica "aguardando permissão", a tela mostra o comando completo e o agente espera a decisão.
+2. **Given** um pedido pendente, **When** o usuário clica em "Permitir uma vez", **Then** o comando roda, o passo volta a "executando" e um pedido igual no futuro volta a perguntar.
+3. **Given** um pedido pendente, **When** o usuário clica em "Permitir sempre `<regra>` nesta execução", **Then** o comando roda e, até o fim desta execução, comandos que casam com a regra exibida rodam sem perguntar.
+4. **Given** um pedido pendente, **When** o usuário clica em "Negar", **Then** o comando não roda, o agente é informado da negação e continua o passo.
+5. **Given** o Modo Yolo marcado no envio, **When** o agente roda comandos, **Then** nenhum pedido aparece; os bloqueios de git e a verificação de referências (FR-011a) continuam valendo.
+6. **Given** um pedido pendente, **When** o usuário interrompe a execução, **Then** o comando é negado, o passo fica "interrompido" e o pedido fica registrado como cancelado.
+
+---
+
 ### User Story 4 - Criar, editar, reordenar e salvar esteiras personalizadas (Priority: P3)
 
 O usuário cria uma esteira nova ou edita uma existente: adiciona ou remove passos, define para cada passo um nome, um modelo de IA e uma skill ou comando, reordena os passos e salva a esteira com um nome. Depois, pode escolher qual esteira salva usar em uma execução, inclusive esteiras que usam skills diferentes do Spec Kit.
@@ -132,6 +151,11 @@ O usuário abre o histórico e vê a lista de execuções anteriores, da mais re
 - **Aplicação fechada durante uma execução**: a execução é encerrada como numa interrupção do usuário (os processos de agentes são finalizados e as alterações parciais são commitadas conforme FR-010a) e, ao reabrir, ela aparece como interrompida no histórico, com as saídas registradas até aquele ponto.
 - **Tentativa de iniciar uma segunda execução enquanto outra está em andamento**: o sistema não permite; apenas uma execução por vez.
 - **Ferramenta de agente de IA indisponível ou não autenticada na máquina**: o primeiro passo falha com mensagem orientando o usuário a corrigir a configuração.
+- **Comando que a ferramenta de agente considera somente leitura** (ex.: `echo`): roda sem pedido de permissão mesmo com o Modo Yolo desmarcado; essa aprovação é da própria ferramenta e não é controlável pelo orquestrador (research R13).
+- **Vários pedidos de permissão ao mesmo tempo** (o agente usa ferramentas em paralelo): cada pedido é exibido e decidido individualmente; o passo só volta a "executando" quando todos forem decididos.
+- **Pedido de permissão sem decisão por tempo indefinido**: o passo permanece em "aguardando permissão" e o tempo de espera não conta para o limite do passo (FR-032), limitado apenas pelo tempo máximo de espera da ferramenta de agente (research R13).
+- **Canal de permissão indisponível** (ex.: falha de comunicação entre a ferramenta de agente e o orquestrador): o comando é negado e o agente recebe uma mensagem explicando o motivo (FR-031).
+- **Aplicação fechada com pedido pendente**: o comando é negado, o pedido fica registrado como cancelado e a execução aparece como interrompida ao reabrir.
 
 ## Requirements *(mandatory)*
 
@@ -163,7 +187,7 @@ O usuário abre o histórico e vê a lista de execuções anteriores, da mais re
 **Visualização e acompanhamento**
 
 - **FR-013**: A esteira MUST ser exibida como uma sequência de caixas, uma por passo, abaixo do campo de entrada, mostrando nome, modelo e skill/comando de cada passo.
-- **FR-014**: Cada caixa MUST exibir o status atual do passo: aguardando, executando, aguardando resposta (somente passos interativos), concluído, com erro ou interrompido.
+- **FR-014**: Cada caixa MUST exibir o status atual do passo: aguardando, executando, aguardando resposta (somente passos interativos), aguardando permissão (FR-028), concluído, com erro ou interrompido.
 - **FR-015**: Usuários MUST ser capazes de abrir a saída de qualquer passo; a saída de um passo em execução MUST ser atualizada em tempo real conforme é produzida.
 - **FR-016**: O sistema MUST registrar entrada (o texto enviado ao agente em cada invocação), saída, erros, duração e consumo reportado (quando disponível) de cada passo, e mantê-los consultáveis após o fim da execução, inclusive após reiniciar a aplicação.
 - **FR-016a**: O sistema MUST oferecer um histórico que lista as execuções anteriores, da mais recente para a mais antiga, exibindo data, repositório, nome da esteira, início da descrição, status final, branch do resultado, duração total e consumo total (FR-017a).
@@ -177,6 +201,15 @@ O usuário abre o histórico e vê a lista de execuções anteriores, da mais re
 - **FR-018**: Usuários MUST ser capazes de interromper a execução a qualquer momento; a interrupção MUST encerrar o processo do agente do passo em andamento e impedir o início de novos passos.
 - **FR-018a**: Cada passo MUST ter um limite de tempo, configurável na definição da esteira, com padrão de 30 minutos quando não definido. O limite MUST contar apenas o tempo em que o agente está trabalhando: a execução inicial e cada resposta de um passo interativo recebem o limite completo, e a pausa em "aguardando resposta" não conta. Ao atingir o limite, o sistema MUST encerrar o passo exatamente como em FR-018, marcá-lo como "interrompido" com o motivo "tempo limite excedido" e parar a esteira.
 - **FR-019**: O sistema MUST NOT reexecutar passos automaticamente.
+
+**Permissões do agente**
+
+- **FR-027**: A tela de envio MUST oferecer o checkbox "Modo Yolo: o agente executa qualquer comando sem perguntar", desmarcado sempre que a página é carregada. A escolha MUST valer para a execução inteira e ficar registrada nela. Com o Modo Yolo marcado, o agente MUST poder rodar comandos sem pedido de permissão; os bloqueios de comandos git e a verificação de FR-011a MUST continuar valendo.
+- **FR-028**: Com o Modo Yolo desmarcado, todo uso de ferramenta que a ferramenta de agente não aprove sozinha (ex.: comandos de shell) MUST gerar um pedido de permissão antes de ser executado: o passo e a execução MUST ficar em "aguardando permissão", a tela MUST exibir a ferramenta e a entrada completa (ex.: o comando), e o agente MUST esperar a decisão.
+- **FR-029**: Para cada pedido, o usuário MUST poder escolher "Permitir uma vez", "Permitir sempre nesta execução" ou "Negar". "Permitir sempre" MUST criar uma regra, exibida antes do clique, que aprova automaticamente, até o fim da execução, os pedidos seguintes que casarem com ela; uma regra MUST NOT aprovar comandos encadeados (ex.: com `;`, `&&`, `|`). Negar MUST impedir a execução e informar o agente.
+- **FR-030**: Os pedidos de permissão, as decisões e as regras criadas MUST ficar registrados na execução e consultáveis no histórico (FR-016).
+- **FR-031**: Qualquer falha no canal de permissão (sem resposta do orquestrador, invocação já encerrada, execução interrompida ou aplicação fechando) MUST resultar em negação do pedido.
+- **FR-032**: O tempo em que o passo fica em "aguardando permissão" MUST NOT contar para o limite de tempo de FR-018a. Interromper MUST continuar disponível nesse estado (FR-018).
 
 **Gestão de esteiras**
 
@@ -195,8 +228,9 @@ O usuário abre o histórico e vê a lista de execuções anteriores, da mais re
 
 - **Esteira (Pipeline)**: Sequência nomeada e ordenada de passos. Atributos: nome, lista ordenada de passos, indicador de esteira padrão. É salva como definição declarativa reutilizável.
 - **Passo (Step)**: Unidade da esteira. Atributos: nome, modelo de IA, skill ou comando a executar, posição na esteira, indicador de interativo, limite de tempo (opcional; padrão de 30 minutos).
-- **Execução (Run)**: Uma aplicação de uma esteira a um repositório. Atributos: esteira usada (cópia da definição no momento do envio), repositório alvo, descrição da feature, branch de origem, referências pré-existentes no início (branches locais, referências remotas e tags), branches criadas durante a execução, branch final do resultado, status geral, horário de início/fim. A duração total e o consumo total são derivados da soma dos passos (FR-017a), sem armazenamento próprio.
-- **Execução de Passo (Step Run)**: Registro de um passo dentro de uma execução. Atributos: passo correspondente, status, saída, respostas enviadas pelo usuário (passos interativos), mensagem de erro, motivo da interrupção (usuário ou tempo limite excedido), duração, consumo reportado.
+- **Execução (Run)**: Uma aplicação de uma esteira a um repositório. Atributos: esteira usada (cópia da definição no momento do envio), repositório alvo, descrição da feature, branch de origem, referências pré-existentes no início (branches locais, referências remotas e tags), branches criadas durante a execução, branch final do resultado, status geral, horário de início/fim, Modo Yolo (sim/não) e regras de "permitir sempre" criadas durante a execução. A duração total e o consumo total são derivados da soma dos passos (FR-017a), sem armazenamento próprio.
+- **Execução de Passo (Step Run)**: Registro de um passo dentro de uma execução. Atributos: passo correspondente, status, saída, respostas enviadas pelo usuário (passos interativos), mensagem de erro, motivo da interrupção (usuário ou tempo limite excedido), duração, consumo reportado, pedidos de permissão.
+- **Pedido de Permissão (Permission Request)**: Pedido do agente para usar uma ferramenta durante um passo (FR-028). Atributos: ferramenta, entrada completa (ex.: o comando), situação (pendente, permitido uma vez, permitido sempre, negado, aprovado por regra, cancelado), regra criada (quando houver), horários do pedido e da decisão.
 - **Repositório Alvo**: Repositório Git local selecionado pelo usuário. Atributos: caminho na máquina, branch atual.
 
 ## Success Criteria *(mandatory)*
@@ -211,6 +245,7 @@ O usuário abre o histórico e vê a lista de execuções anteriores, da mais re
 - **SC-006**: Em 100% das execuções (concluídas, com erro ou interrompidas), a branch de origem e as demais branches pré-existentes do repositório permanecem inalteradas.
 - **SC-007**: O usuário consegue criar e salvar uma esteira nova com 3 passos em menos de 3 minutos.
 - **SC-008**: 100% das saídas e erros dos passos de uma execução continuam consultáveis após o fim da execução e após reiniciar a aplicação.
+- **SC-009**: Com o Modo Yolo desmarcado, 100% dos comandos que a ferramenta de agente não aprova sozinha só rodam depois de uma decisão do usuário (ou de uma regra que ele criou na execução), e nenhum comando negado é executado.
 
 ## Assumptions
 

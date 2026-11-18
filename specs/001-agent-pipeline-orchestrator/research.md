@@ -119,6 +119,8 @@ Se qualquer verificação falhar, o passo fica "com erro" com uma mensagem que l
 
 **Risco conhecido**: versões antigas do script `create-new-feature` do Spec Kit (que criava a branch da feature; no 1.4.1 isso depende da extensão de git, R2) rodavam `git fetch --all --prune` para numerar features, o que faria o Specify falhar nessa verificação. A versão instalada neste repositório não faz fetch. Se o repositório alvo usar uma versão antiga, a mensagem de erro aponta a ref remota alterada, e a correção é atualizar o Spec Kit no alvo.
 
+**Atualização (US6, R13)**: os argumentos acima passam a valer só no **Modo Yolo**. Com o Modo Yolo desmarcado (padrão), `Bash` e `PowerShell` saem de `--allowedTools` e cada uso não aprovado pela CLI vira um pedido de permissão decidido pelo usuário em tempo real (R13). `--disallowedTools` e a verificação de refs valem nos dois modos.
+
 **Alternativas consideradas**: `bypassPermissions` + *deny* (permissivo demais); hook `PreToolUse` customizado no repositório alvo (escreveria arquivos no alvo, o que é proibido pelo requisito de não sujar a árvore de trabalho); sandbox de SO (complexo demais para v1).
 
 ### R3a. Isolamento da configuração pessoal do usuário
@@ -218,7 +220,7 @@ As 9 skills `speckit-*` do projeto continuaram disponíveis. As skills de `~/.cl
 - Estrutura: `pipelines/<id>.json`, `runs/<runId>/run.json` (registro da execução) e `runs/<runId>/<stepIndex>.output.jsonl` (saída do passo, uma entrada por linha, gravada em modo *append*).
 - Escrita atômica de `run.json` e das esteiras: grava em `*.tmp` e faz `rename`.
 - **Primeira inicialização**: se `pipelines/` estiver vazia, grava a esteira padrão do Spec Kit (FR-020) com `isDefault: true`.
-- **Recuperação após falha**: na inicialização, qualquer `run.json` com status não terminal (`running`/`awaiting_input`) é marcado como `interrupted`, com motivo `server_shutdown` (cobre o caso em que o processo morreu sem passar pelo *shutdown* gracioso).
+- **Recuperação após falha**: na inicialização, qualquer `run.json` com status não terminal (`running`/`awaiting_input`/`awaiting_permission`) é marcado como `interrupted`, com motivo `server_shutdown`, e os pedidos de permissão pendentes viram `cancelled` (R13) (cobre o caso em que o processo morreu sem passar pelo *shutdown* gracioso).
 
 **Alternativas**: SQLite (vetado pelo usuário: sem banco); um único arquivo de histórico (cresce sem limite e tem risco de corrupção).
 
@@ -254,3 +256,49 @@ As 9 skills `speckit-*` do projeto continuaram disponíveis. As skills de `~/.cl
 **Decisão**: Node 24 LTS (instalado: 24.15.0), npm workspaces, TypeScript 5.x (`strict`, `noUncheckedIndexedAccess`), Vitest (`environment: node` no servidor e `jsdom` + Testing Library no web), `tsx` para rodar o servidor em desenvolvimento, Vite + `@vitejs/plugin-react`. O Vite em desenvolvimento faz proxy de `/api` e `/ws` para `127.0.0.1:4317`.
 
 - O pacote `shared` é consumido como fonte TypeScript, via `exports` apontando para `src/index.ts` e *project references*. Isso evita uma etapa de build separada.
+
+---
+
+## R13. Pedidos de permissão em tempo real e Modo Yolo (US6)
+
+**Decisão**: com o Modo Yolo desmarcado (padrão), cada invocação do `claude` recebe:
+
+```text
+--allowedTools Read Edit Write Glob Grep Skill TodoWrite      # sem Bash/PowerShell
+--disallowedTools <regras git de R3>
+--strict-mcp-config --mcp-config '{"mcpServers":{"orchestrator":{"command":"<node>","args":["<permission-relay/relay.mjs>"],"env":{"ORCHESTRATOR_PERMISSION_URL":"http://127.0.0.1:<porta>/internal/permission-requests","ORCHESTRATOR_PERMISSION_TOKEN":"<token da invocação>"}}}}'
+--permission-prompt-tool mcp__orchestrator__approve
+```
+
+A CLI consulta a ferramenta `approve` antes de cada uso não aprovado e espera a resposta. O relay é um servidor MCP stdio mínimo, sem dependência (JSON-RPC à mão), que repassa o pedido por HTTP ao orquestrador; o orquestrador segura a requisição até o usuário decidir. Com o Modo Yolo marcado, valem os argumentos de R3, sem canal de permissão.
+
+**Validado em teste real (2026-11-17, CLI 2.1.327, `haiku`)** com um relay mínimo e `Bash` fora de `--allowedTools`:
+
+- comando que escreve arquivo (`node -e "...writeFileSync..."`) → a CLI chamou `tools/call` com `{ tool_name: "Bash", input: { command, description }, tool_use_id }` **antes** de executar;
+- resposta `{"behavior":"allow","updatedInput":<input>}` → executou; `{"behavior":"deny","message":"..."}` → não executou, o agente recebeu a mensagem como `tool_result` com erro e o `result` listou o item em `permission_denials`;
+- com `--strict-mcp-config`, o relay foi o único servidor MCP (`connected`) e a ferramenta `approve` **não** apareceu na lista de ferramentas do agente: ele não consegue aprovar os próprios pedidos;
+- **comandos que a CLI considera somente leitura (ex.: `echo`) foram aprovados por ela mesma, sem consulta**. Não é controlável pelo orquestrador;
+- mensagens recebidas pelo relay: `server/discover`, `initialize`, `notifications/initialized`, `tools/list`, `tools/call` (uma por linha).
+
+**Detalhes**:
+
+- **Token por invocação** (`randomBytes(32)`), passado ao relay por variável de ambiente; a rota `/internal/permission-requests` fica fora de `/api`, sob o *origin guard* e o `listen` em `127.0.0.1`, e só aceita o token de uma invocação viva.
+- **Falha fechada**: erro de rede, token inválido, invocação encerrada, interrupção ou shutdown → `deny` com mensagem explicativa (FR-031).
+- **HTTP no relay com `node:http`**, sem timeout: o `fetch` do Node tem `headersTimeout` de 300 s e cortaria esperas longas pela decisão.
+- **Regra de "permitir sempre"**: para `Bash`/`PowerShell`, prefixo com os dois primeiros tokens do comando (`Bash(npm test:*)`); para outras ferramentas, o nome da ferramenta. Uma regra nunca casa com comandos que contenham `;`, `&&`, `||`, `|`, `` ` ``, `$(` ou quebra de linha.
+- **Timer pausável**: o limite de R4 é pausado em `awaiting_permission` e retomado com o tempo restante (FR-032).
+- **Relay fora de `src`** (`apps/server/permission-relay/relay.mjs`), para rodar com `node` puro em desenvolvimento (`tsx`) e em produção (`dist`).
+
+**A verificar antes da implementação (T105)**:
+
+1. Por quanto tempo a CLI espera a resposta de `tools/call`. Se houver limite, ajustar por variável de ambiente no `spawn` (ex.: `MCP_TOOL_TIMEOUT`); se for intransponível, registrar aqui o valor, e o pedido vira `cancelled` com a mensagem "A CLI desistiu de esperar pela decisão".
+2. Se `--permission-mode bypassPermissions` respeita `--disallowedTools`. Se respeitar, o Modo Yolo usa `bypassPermissions` (libera também ferramentas fora da lista, como `WebFetch`); se não, mantém os argumentos de R3.
+
+**Alternativas consideradas**:
+
+- *Pausa depois da invocação* (ler `permission_denials` do `result` e retomar a sessão com a ferramenta liberada): simples, mas a decisão vem depois do fato, o agente pode já ter contornado e liberar custa uma nova invocação.
+- *Liberação prévia por passo no editor*: não avisa quando surge um pedido novo.
+- *Servidor MCP HTTP no próprio orquestrador* (sem relay): evita um processo, mas exige implementar o transporte HTTP do MCP; o relay stdio é menor e foi o validado.
+- *Protocolo de controle via stdin* (`--input-format stream-json`): pouco documentado; descartado.
+
+Detalhamento técnico: [`docs/superpowers/plans/2026-11-17-modo-yolo-permissoes.md`](../../docs/superpowers/plans/2026-11-17-modo-yolo-permissoes.md).

@@ -86,13 +86,15 @@ apps/
 │   │   ├── git/             # git-service.ts, exec-git.ts, branch-name.ts
 │   │   ├── agent/           # agent-runner.ts (interface), claude-cli-runner.ts,
 │   │   │                    # stream-json-parser.ts, permissions.ts, system-prompts.ts,
-│   │   │                    # kill-tree.ts, command-lookup.ts
-│   │   ├── execution/       # state-machine.ts, pipeline-executor.ts, run-lock.ts
+│   │   │                    # kill-tree.ts, command-lookup.ts, resolve-claude.ts, relay-path.ts
+│   │   ├── execution/       # state-machine.ts, pipeline-executor.ts, run-lock.ts,
+│   │   │                    # pausable-timer.ts, permission-broker.ts (US6), recovery.ts
 │   │   ├── storage/         # data-dir.ts, pipeline-store.ts, run-store.ts,
 │   │   │                    # settings-store.ts, atomic-write.ts
 │   │   ├── http/            # app.ts (express), routes/*.ts, origin-guard.ts, errors.ts
 │   │   ├── ws/              # event-hub.ts (broadcast + batching de saída)
 │   │   └── main.ts          # composição, listen 127.0.0.1, shutdown gracioso, recuperação
+│   ├── permission-relay/    # relay.mjs: servidor MCP stdio de permissões, rodado com node puro (US6, research R13)
 │   └── tests/
 │       ├── unit/            # state-machine, executor (FakeAgentRunner), stream-json-parser,
 │       │                    # permissions, branch-name, stores
@@ -118,6 +120,7 @@ apps/
 - **`AgentRunner` / `ClaudeCliRunner`** (`agent/`): ver [contracts/agent-runner.md](./contracts/agent-runner.md). Adiciona `--append-system-prompt` com `NON_INTERACTIVE_SYSTEM_PROMPT` (`agent/system-prompts.ts`) quando o passo não é interativo (FR-006a, research R2a).
 - **Limite de tempo** (`execution/`): por invocação, o executor cria um `AbortController` e agenda `setTimeout(() => controller.abort("timeout"), ms)`, com `clearTimeout` ao fim. Interromper e shutdown abortam o mesmo controller com `"user"`/`"server_shutdown"`, e `signal.reason` define o `interruptReason`. `AbortSignal.timeout` não é usado porque os *fake timers* do Vitest não o controlam (research R4).
 - **`PipelineExecutor`** (`execution/`): orquestra uma execução usando a máquina de estados, o `GitService`, o `AgentRunner`, o `RunStore` e o `EventHub`. Expõe `start`, `reply`, `advance`, `interrupt` e `shutdown`. Uma `RunLock` garante uma execução por vez (FR-012).
+- **Permissões e Modo Yolo** (US6, research R13): fora do Modo Yolo, cada invocação recebe um canal de permissão (token aleatório) do `PermissionBroker`; a CLI consulta o relay MCP stdio (`permission-relay/relay.mjs`), que repassa o pedido a `POST /internal/permission-requests`. O executor registra o `PermissionRequest`, pausa o passo em `awaiting_permission` com o timer pausado e responde à CLI quando o usuário decide. Falhas no canal negam o pedido. Detalhamento: [`docs/superpowers/plans/2026-11-17-modo-yolo-permissoes.md`](../../docs/superpowers/plans/2026-11-17-modo-yolo-permissoes.md).
 - **Shutdown** (`main.ts`): em `SIGINT`/`SIGTERM`, chama `executor.shutdown()` (interrompe com `server_shutdown`, commit WIP e persistência) e só então fecha o servidor. Na inicialização, runs não terminais são marcados como `interrupted` (R8).
 
 ## Ordem de construção (incrementos verificáveis, Princípio V)
@@ -131,6 +134,7 @@ apps/
 | 5 | Servidor REST + WebSocket + origin guard + recuperação na inicialização | testes de integração com `fetch`/`ws` contra o servidor em porta efêmera e executor com fake |
 | 6 | UI: seleção de repo, entrada, caixas, saída em tempo real, responder/avançar/interromper | testes de componentes; validação manual da quickstart, itens 1–5 |
 | 7 | Histórico (lista + visualização somente leitura) e editor de esteiras | testes de componentes; quickstart, itens 6–8 |
+| 8 | Pedidos de permissão em tempo real e Modo Yolo (US6) | testes do relay (protocolo stdio contra servidor HTTP de stub), do broker, do timer pausável e do executor com `FakeAgentRunner` + broker; quickstart, item 10 |
 
 ## Complexity Tracking
 

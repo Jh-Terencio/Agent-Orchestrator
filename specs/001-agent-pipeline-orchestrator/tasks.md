@@ -206,7 +206,29 @@ Monorepo com npm workspaces (plan.md, "Project Structure"):
 
 ---
 
-## Phase 6: User Story 4 - Criar, editar, reordenar e salvar esteiras personalizadas (Priority: P3)
+## Phase 6: User Story 6 - Decidir permissões do agente ou rodar em Modo Yolo (Priority: P2)
+
+**Goal**: checkbox "Modo Yolo" desmarcado por padrão; sem ele, cada uso de ferramenta que a CLI não aprova sozinha vira um pedido de permissão em tempo real (permitir uma vez, permitir sempre nesta execução, negar), com o timer pausado durante a espera (FR-027–FR-032, research R13).
+
+**Independent Test**: quickstart, validação manual 10.
+
+**Detalhamento técnico** (interfaces, assinaturas, testes e valores exatos): [`docs/superpowers/plans/2026-11-17-modo-yolo-permissoes.md`](../../docs/superpowers/plans/2026-11-17-modo-yolo-permissoes.md). Cada tarefa abaixo corresponde a uma Task do plano. Depende de US2 (T072 `StepBox`) e de US3 (T080–T085: `killProcessTree`, `interrupt`, `shutdown`, timer por invocação e `recoverInterruptedRuns`).
+
+- [ ] T105 [US6] Verificar na CLI real (manual, `haiku`): quanto tempo ela espera a resposta de `tools/call` (e o ajuste por variável de ambiente, se necessário) e se `--permission-mode bypassPermissions` respeita `--disallowedTools`; registrar em research R13 as decisões `PERMISSION_ENV` e `YOLO_PERMISSION_MODE` (plano, Task 2)
+- [ ] T106 [P] [US6] Testes e implementação em `packages/shared`: `awaiting_permission` em `RunStatus`/`StepStatus`, `PermissionRequestSchema`, `Run.yolo`, `Run.permissionRules`, `StepRun.permissionRequests` (com `.default`), `StartRunRequest.yolo`, `PermissionDecisionRequestSchema`, e `src/permission-rules.ts` (`deriveRule`, `matchesRule`, `summarizeToolInput` movido do parser) (plano, Task 3)
+- [ ] T107 [US6] Testes e implementação dos eventos `permission_request`/`permission_decision` em `apps/server/src/execution/state-machine.ts`, de `apps/server/src/execution/pausable-timer.ts` (`createPausableTimer`) e do tratamento de `awaiting_permission` em `recoverInterruptedRuns` (plano, Task 4)
+- [ ] T108 [US6] Testes e implementação de `permissionChannel` em `AgentInvocation`, dos argumentos por modo em `apps/server/src/agent/permissions.ts`, do relay MCP stdio `apps/server/permission-relay/relay.mjs` (com `node:http`, falha fechada) e de `apps/server/src/agent/relay-path.ts` (plano, Task 5)
+- [ ] T109 [US6] Testes e implementação de `apps/server/src/execution/permission-broker.ts` (`PermissionBroker`) e da rota `POST /internal/permission-requests` em `apps/server/src/http/routes/internal.ts`, com token por invocação e origin guard (plano, Task 6)
+- [ ] T110 [US6] Testes (grupo "US6" em `apps/server/tests/unit/executor.test.ts`) e implementação no `PipelineExecutor`: canal por invocação fora do Yolo, `PermissionRequest` com saída `system`, `awaiting_permission` com timer pausado, regras de "permitir sempre", pedidos paralelos, `decidePermission`, interrupção com pedidos pendentes; `FakeAgentRunner` com `permissionRequests` (plano, Task 7)
+- [ ] T111 [US6] Testes em `apps/server/tests/integration/runs-api.test.ts` e implementação de `yolo` em `POST /runs`, de `POST /runs/:id/permissions/:requestId` e de `interrupt` em `awaiting_permission` (plano, Task 8)
+- [ ] T112 [US6] Testes em `apps/web/tests/permissions.us6.test.tsx` e implementação do checkbox Modo Yolo em `FeatureInput`, de `apps/web/src/components/PermissionPrompt.tsx`, de `decidePermission` em `client.ts`, dos rótulos "aguardando permissão" e do indicador Yolo e da lista de pedidos no `RunSummary` (plano, Task 9)
+- [ ] T113 [US6] Executar a validação manual 10 do quickstart com a CLI real e registrar o resultado em `validation.md` (plano, Task 10)
+
+**Checkpoint**: com o Modo Yolo desmarcado, nenhum comando não aprovado pela CLI roda sem decisão do usuário (SC-009); com ele marcado, nenhum pedido aparece; os bloqueios de git valem nos dois modos.
+
+---
+
+## Phase 7: User Story 4 - Criar, editar, reordenar e salvar esteiras personalizadas (Priority: P3)
 
 **Goal**: editor de esteiras sobre o JSON (criar, editar, adicionar/remover/reordenar passos, salvar, duplicar, excluir) e escolha da esteira antes de enviar.
 
@@ -229,7 +251,7 @@ Monorepo com npm workspaces (plan.md, "Project Structure"):
 
 ---
 
-## Phase 7: User Story 5 - Consultar execuções anteriores (Priority: P3)
+## Phase 8: User Story 5 - Consultar execuções anteriores (Priority: P3)
 
 **Goal**: histórico do mais recente para o mais antigo, e abertura de qualquer execução em modo somente leitura na mesma visualização de caixas.
 
@@ -250,7 +272,7 @@ Monorepo com npm workspaces (plan.md, "Project Structure"):
 
 ---
 
-## Phase 8: Polish & Cross-Cutting Concerns
+## Phase 9: Polish & Cross-Cutting Concerns
 
 **Purpose**: build de produção, documentação e validação final
 
@@ -273,15 +295,16 @@ Monorepo com npm workspaces (plan.md, "Project Structure"):
 - **US1 (Phase 3)**: depende da Phase 2
 - **US2 (Phase 4)**: depende da Phase 2; integra-se ao executor e à RunPage de US1 (T069 e T074 alteram arquivos de US1), por isso na prática vem depois de US1
 - **US3 (Phase 5)**: depende de US1 (estende `claude-cli-runner.ts` e `pipeline-executor.ts`); independe de US2
-- **US4 (Phase 6)**: depende da Phase 2 para as rotas e o editor; T089/T090 tocam executor e RunPage de US1
-- **US5 (Phase 7)**: depende de US2 (reutiliza `PipelineBoxes`, `StepOutputPanel` e a rota de saída)
-- **Polish (Phase 8)**: depende das histórias desejadas
+- **US6 (Phase 6)**: depende de US2 (T072) e de US3 (T080–T085); T110 e T111 estendem executor e rotas de US1/US3
+- **US4 (Phase 7)**: depende da Phase 2 para as rotas e o editor; T089/T090 tocam executor e RunPage de US1
+- **US5 (Phase 8)**: depende de US2 (reutiliza `PipelineBoxes`, `StepOutputPanel` e a rota de saída)
+- **Polish (Phase 9)**: depende das histórias desejadas
 
 ### User Story Dependencies
 
 ```text
 Setup → Foundational ─┬─► US1 ─┬─► US2 ──► US5
-                      │        ├─► US3
+                      │        ├─► US3 ──► US6 (também depende de US2)
                       │        └─► US4 (T089/T090)
                       └─► US4 (T086–T088, T091–T092 podem começar já)
 ```
@@ -301,6 +324,7 @@ Setup → Foundational ─┬─► US1 ─┬─► US2 ──► US5
 - US3: os testes T075–T079 em paralelo; T080 em paralelo com os testes
 - US4: T086 e T087 em paralelo; T090 e T091 em paralelo; T086–T088 e T091–T092 podem correr ao lado de US2/US3
 - US5: T093 e T094 em paralelo
+- US6: T106 pode começar junto com T105; as demais seguem em ordem (cada uma usa as interfaces da anterior)
 
 ---
 
@@ -361,9 +385,10 @@ US1 sozinha já é testável (resultado no git, status das caixas via `run.updat
 2. US1 → esteira padrão executa (incrementos 3–6)
 3. US2 → transparência em tempo real
 4. US3 → controle de custo: interromper, timeout, shutdown (Princípio VIII)
-5. US4 → esteiras personalizadas (incremento 7)
-6. US5 → histórico (incremento 7)
-7. Polish → build de produção e validação final
+5. US6 → pedidos de permissão em tempo real e Modo Yolo
+6. US4 → esteiras personalizadas (incremento 7)
+7. US5 → histórico (incremento 7)
+8. Polish → build de produção e validação final
 
 Cada incremento termina com `npm run typecheck` e `npm test` verdes e com o sistema funcionando (Princípio V).
 
@@ -376,4 +401,4 @@ Cada incremento termina com `npm run typecheck` e `npm test` verdes e com o sist
 - Nunca enfraquecer ou desabilitar testes para passar (Princípio VII)
 - Commit após cada tarefa ou grupo lógico
 - Testes de git e do executor usam repositórios temporários e `ORCHESTRATOR_DATA_DIR` temporário: nunca tocam o repositório do projeto nem a pasta de dados real
-- Os testes nunca invocam o `claude` real, exceto o *smoke test* opcional (T099)
+- Os testes nunca invocam o `claude` real, exceto o *smoke test* opcional (T099); T105 e T113 são verificações manuais com a CLI real

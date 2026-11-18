@@ -13,6 +13,7 @@ export interface AgentInvocation {
   interactive: boolean;     // false → instrui o agente a não fazer perguntas (FR-006a)
   priorSessionCostUsd: number | null; // total_cost_usd bruto da invocação anterior da mesma sessão; 0 quando resume = false; null se desconhecido (research R1)
   signal: AbortSignal;      // AbortController do executor; reason = "user" | "timeout" | "server_shutdown"
+  permissionChannel: PermissionChannel | null; // null = Modo Yolo; senão, canal de pedidos de permissão (US6, research R13)
   onOutput: (entry: Omit<OutputEntry, "seq" | "at">) => void;
 }
 
@@ -22,6 +23,12 @@ export type AgentOutcome =
   | { kind: "success"; usage: Usage | null; sessionCostUsd: number | null; durationMs: number }
   | { kind: "error"; message: string; usage: Usage | null; sessionCostUsd: number | null; durationMs: number }
   | { kind: "interrupted"; usage: Usage | null; sessionCostUsd: number | null; durationMs: number };
+
+// Canal de permissão de uma invocação: o relay faz POST em `url` com o cabeçalho X-Orchestrator-Token: token.
+export interface PermissionChannel {
+  url: string;   // http://127.0.0.1:<porta>/internal/permission-requests
+  token: string; // aleatório, válido só enquanto a invocação está viva
+}
 
 export interface AgentRunner {
   run(invocation: AgentInvocation): Promise<AgentOutcome>; // nunca rejeita; erros viram { kind: "error" }
@@ -55,9 +62,10 @@ O `error` resolvido vira `kind: "error"` sem iniciar processo.
   --output-format stream-json --verbose --include-partial-messages
   --model <model>
   (--session-id <sessionId> | --resume <sessionId>)
-  --permission-mode acceptEdits
+  --permission-mode acceptEdits                 # no Modo Yolo, ver research R13 (bypassPermissions, se T105 confirmar)
   --setting-sources project,local --strict-mcp-config   # sempre; isola a configuração pessoal (research R3a)
-  --allowedTools ... --disallowedTools ...      # constante em agent/permissions.ts (research R3)
+  --allowedTools ... --disallowedTools ...      # constante em agent/permissions.ts (research R3); sem Bash/PowerShell fora do Modo Yolo
+  [--mcp-config <relay> --permission-prompt-tool mcp__orchestrator__approve]   # só quando permissionChannel != null (research R13)
   [--append-system-prompt <NON_INTERACTIVE_SYSTEM_PROMPT>]   # só quando interactive = false (research R2a)
 cwd = invocation.cwd ; stdin = ignore ; detached = (plataforma ≠ win32)
 ```
@@ -81,3 +89,11 @@ O limite de tempo **não** é responsabilidade do runner. O executor cria um `Ab
 ## `FakeAgentRunner` (testes)
 
 Roteiro programável por chamada: emite N `onOutput`, executa um `sideEffect?: (cwd: string) => Promise<void>` opcional (para simular o trabalho do agente no repositório: escrever arquivos, `git switch -c`, trocar para uma branch pré-existente, criar tag), espera um atraso (com *fake timers*) e resolve com o resultado configurado. O `sideEffect` roda antes de resolver e também quando a chamada é interrompida (simula alterações parciais). Respeita `signal` e registra as invocações recebidas para asserções (modelo, `resume`, `interactive`, `sessionId`, `priorSessionCostUsd`, prompt). O resultado configurado pode incluir `sessionCostUsd`.
+
+## Pedidos de permissão (US6, research R13)
+
+Quando `permissionChannel` não é `null`, o runner passa à CLI um servidor MCP stdio próprio (`apps/server/permission-relay/relay.mjs`, rodado com `process.execPath`) com `ORCHESTRATOR_PERMISSION_URL` e `ORCHESTRATOR_PERMISSION_TOKEN` no `env`, e `--permission-prompt-tool mcp__orchestrator__approve`. O runner **não** decide nada: o relay repassa cada `tools/call` ao orquestrador e devolve `{"behavior":"allow","updatedInput":...}` ou `{"behavior":"deny","message":"..."}`. Qualquer falha no relay (rede, status ≠ 200) vira `deny` (FR-031).
+
+O processo do agente continua vivo enquanto espera a decisão; a pausa do limite de tempo é responsabilidade do executor (FR-032), e o `signal` abortado durante a espera segue a garantia 1 (o executor nega os pedidos pendentes antes de abortar).
+
+**FakeAgentRunner**: aceita um `PermissionBroker` e um roteiro com `permissionRequests` (sequenciais ou paralelos), que ele envia pelo broker usando o token de `permissionChannel`, registrando as decisões recebidas.
