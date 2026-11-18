@@ -312,6 +312,7 @@ describe("ApiErrorSchema", () => {
       "REPO_REJECTED",
       "PIPELINE_INVALID",
       "FORBIDDEN_ORIGIN",
+      "INTERNAL_ERROR",
     ];
     for (const code of codes) {
       expect(ApiErrorSchema.safeParse({ error: { code, message: "m" } }).success).toBe(true);

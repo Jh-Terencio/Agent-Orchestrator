@@ -12,6 +12,7 @@ export const ApiErrorCodeSchema = z.enum([
   "REPO_REJECTED",
   "PIPELINE_INVALID",
   "FORBIDDEN_ORIGIN",
+  "INTERNAL_ERROR",
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCodeSchema>;
 

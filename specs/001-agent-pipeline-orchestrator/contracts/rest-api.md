@@ -20,6 +20,7 @@ Os tipos referenciados estão em [data-model.md](../data-model.md) e são export
 | 422 | `REPO_REJECTED` | o repositório falhou nas validações de FR-002 ou a branch não pôde ser criada (`details.problems`) |
 | 422 | `PIPELINE_INVALID` | o arquivo da esteira no disco não passa no `PipelineSchema` (`issues` presente) |
 | 403 | `FORBIDDEN_ORIGIN` | origem não local |
+| 500 | `INTERNAL_ERROR` | falha inesperada do servidor (a mensagem traz o erro original; detalhes no log) |
 
 ## Repositórios
 
