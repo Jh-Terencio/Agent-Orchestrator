@@ -93,6 +93,8 @@ export class FakeAgentRunner implements AgentRunner {
 /** Resolve `true` se o sinal for abortado antes do fim do atraso. */
 function waitOrAbort(ms: number, signal: AbortSignal): Promise<boolean> {
   if (signal.aborted) return Promise.resolve(true);
+  // Sem atraso, não agenda timer: com `vi.useFakeTimers()` um `setTimeout(0)` só dispararia ao avançar o relógio.
+  if (ms <= 0) return Promise.resolve(false);
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       signal.removeEventListener("abort", onAbort);

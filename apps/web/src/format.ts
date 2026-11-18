@@ -1,4 +1,4 @@
-import type { RepoProblem, RunStatus, StepStatus, Usage } from "@orchestrator/shared";
+import type { InterruptReason, RepoProblem, RunStatus, StepStatus, Usage } from "@orchestrator/shared";
 
 export const PROBLEM_LABELS: Record<RepoProblem, string> = {
   not_a_repo: "A pasta não é um repositório Git",
@@ -15,6 +15,13 @@ export const STEP_STATUS_LABELS: Record<StepStatus, string> = {
   completed: "concluído",
   failed: "com erro",
   interrupted: "interrompido",
+};
+
+/** Motivo exibido na caixa de um passo interrompido. */
+export const INTERRUPT_REASON_LABELS: Record<InterruptReason, string> = {
+  user: "interrompido pelo usuário",
+  timeout: "tempo limite excedido",
+  server_shutdown: "aplicação encerrada",
 };
 
 export const RUN_STATUS_LABELS: Record<RunStatus, string> = {

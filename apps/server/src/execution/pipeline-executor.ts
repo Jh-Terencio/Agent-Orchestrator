@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import {
   computeRunTotals,
+  DEFAULT_TIMEOUT_MINUTES,
+  type InterruptReason,
   type Invocation,
   type OutputEntry,
   type Pipeline,
@@ -50,12 +52,24 @@ export interface StartRunInput {
 interface ActiveRun {
   run: Run;
   git: GitService;
-  /** `true` enquanto um `advance` verifica e commita (evita dois avanços simultâneos). */
+  /** `true` enquanto um `advance` ou uma interrupção em pausa verifica e commita. */
   busy: boolean;
+  /** Controller da invocação em andamento (um por chamada ao agente; research R4). */
+  controller: AbortController | null;
+  /** Interrupção pedida quando não havia invocação viva: aplicada no próximo ponto seguro. */
+  pendingAbort: InterruptReason | null;
+  /** Motivo do abort da última invocação (`signal.reason`). */
+  lastAbortReason: InterruptReason | null;
 }
 
 const TERMINAL_RUN = new Set<Run["status"]>(["completed", "failed", "interrupted"]);
 const TERMINAL_STEP = new Set<StepStatus>(["completed", "failed", "interrupted"]);
+const INTERRUPT_REASONS = new Set<string>(["user", "timeout", "server_shutdown"]);
+const REASON_EVENT: Record<InterruptReason, StepEvent> = {
+  user: "interrupt",
+  timeout: "timeout",
+  server_shutdown: "shutdown",
+};
 
 const PROBLEM_TEXT: Record<RepoProblem, string> = {
   not_a_repo: "a pasta não é um repositório Git",
@@ -165,7 +179,7 @@ export class PipelineExecutor {
         steps: pipeline.steps.map((step) => newStepRun(step.id)),
       };
       await this.deps.runStore.save(run);
-      active = { run, git, busy: false };
+      active = { run, git, busy: false, controller: null, pendingAbort: null, lastAbortReason: null };
     } catch (error) {
       lock.release(runId);
       throw error;
@@ -234,7 +248,73 @@ export class PipelineExecutor {
     }
   }
 
+  /**
+   * Interrompe a execução (FR-018/FR-019): em `running`, aborta a invocação com `"user"` (o agente é
+   * encerrado e o passo fica `interrupted` em segundo plano); em `awaiting_input`, transita direto
+   * para `interrupted` com commit WIP. Nada é reexecutado depois.
+   */
+  async interrupt(runId: string): Promise<void> {
+    const active = await this.requireActive(runId);
+    await this.requestInterrupt(active, "user");
+  }
+
+  /**
+   * Encerramento do servidor (plan, "Shutdown"): interrompe o run ativo com `"server_shutdown"`,
+   * aguarda o commit WIP e a gravação do `run.json` e só então resolve.
+   */
+  async shutdown(): Promise<void> {
+    for (let attempt = 0; this.active !== null && attempt < 50; attempt++) {
+      const active = this.active;
+      try {
+        await this.requestInterrupt(active, "server_shutdown");
+      } catch (error) {
+        console.error("[executor] falha ao interromper no encerramento:", error);
+      }
+      await this.whenIdle();
+      // Um `advance` em curso ainda pode agendar o próximo passo: tenta de novo.
+      if (this.active === active) await new Promise((resolve) => setImmediate(resolve));
+    }
+    await this.whenIdle();
+  }
+
   // ---------------------------------------------------------------------------------------------
+
+  private async requestInterrupt(active: ActiveRun, reason: InterruptReason): Promise<void> {
+    if (active.run.status === "awaiting_input" && !active.busy) {
+      await this.interruptAwaiting(active, reason);
+      return;
+    }
+    // `server_shutdown` prevalece sobre um pedido anterior do usuário.
+    if (active.pendingAbort === null || reason === "server_shutdown") active.pendingAbort = reason;
+    active.controller?.abort(reason);
+  }
+
+  /** Interrupção de um passo em `awaiting_input` (sem processo vivo): verificação de refs e commit WIP. */
+  private async interruptAwaiting(active: ActiveRun, reason: InterruptReason): Promise<StepStatus> {
+    const index = active.run.steps.findIndex((step) => step.status === "awaiting_input");
+    if (index < 0) throw new ApiError(409, "INVALID_STATE", "O passo atual não está aguardando resposta.");
+    active.busy = true;
+    try {
+      await this.closeInterrupted(active, index, reason);
+      return await this.applyStepEvent(active, index, REASON_EVENT[reason]);
+    } catch (error) {
+      await this.crash(active, error);
+      throw error;
+    } finally {
+      active.busy = false;
+    }
+  }
+
+  /** Passo interrompido: motivo, e commit WIP só se a verificação de refs passar (FR-011a). */
+  private async closeInterrupted(active: ActiveRun, index: number, reason: InterruptReason): Promise<void> {
+    const { run } = active;
+    const step = run.pipeline.steps[index]!;
+    const stepRun = run.steps[index]!;
+    const verify = await this.verify(active, index);
+    stepRun.interruptReason = reason;
+    if (verify.violations.length > 0) await this.recordError(active, index, violationMessage(verify));
+    else stepRun.commitSha = await active.git.commitAll(`WIP: passo ${step.name} interrompido`, run.id);
+  }
 
   /** Roda os passos a partir de `index` até uma pausa interativa ou um estado terminal. */
   private async executeFrom(active: ActiveRun, index: number): Promise<void> {
@@ -255,6 +335,10 @@ export class PipelineExecutor {
     stepRun.startedAt = this.now();
     stepRun.sessionId = randomUUID();
     await this.persist(active);
+
+    if (active.pendingAbort !== null) {
+      return this.afterInvocation(active, index, { kind: "interrupted", usage: null, sessionCostUsd: null, durationMs: 0 });
+    }
 
     if (!(await this.commandExists(run.repoPath, step.command))) {
       const name = step.command.trim().split(/\s/, 1)[0] ?? step.command;
@@ -289,26 +373,40 @@ export class PipelineExecutor {
     const stepRun = run.steps[index]!;
     const startedAt = this.now();
     const controller = new AbortController();
+    active.controller = controller;
+    active.lastAbortReason = null;
+    if (active.pendingAbort !== null) controller.abort(active.pendingAbort);
+    // setTimeout (e não AbortSignal.timeout) para os fake timers controlarem o limite (research R4).
+    // O timer é por invocação: a pausa em awaiting_input não conta e cada resposta recebe o limite inteiro.
+    const timeoutMs = (step.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES) * 60_000;
+    const timer = setTimeout(() => controller.abort("timeout"), timeoutMs);
 
     let outputChain: Promise<void> = Promise.resolve();
     let outputError: unknown = null;
-    const outcome = await this.deps.agentRunner.run({
-      cwd: run.repoPath,
-      prompt,
-      model: step.model,
-      sessionId: stepRun.sessionId!,
-      resume,
-      interactive: step.interactive,
-      priorSessionCostUsd,
-      signal: controller.signal,
-      onOutput: (entry) => {
-        outputChain = outputChain
-          .then(() => this.appendOutput(active, index, [entry]))
-          .catch((error: unknown) => {
-            outputError ??= error;
-          });
-      },
-    });
+    let outcome: AgentOutcome;
+    try {
+      outcome = await this.deps.agentRunner.run({
+        cwd: run.repoPath,
+        prompt,
+        model: step.model,
+        sessionId: stepRun.sessionId!,
+        resume,
+        interactive: step.interactive,
+        priorSessionCostUsd,
+        signal: controller.signal,
+        onOutput: (entry) => {
+          outputChain = outputChain
+            .then(() => this.appendOutput(active, index, [entry]))
+            .catch((error: unknown) => {
+              outputError ??= error;
+            });
+        },
+      });
+    } finally {
+      clearTimeout(timer);
+      if (active.controller === controller) active.controller = null;
+    }
+    if (controller.signal.aborted) active.lastAbortReason = toInterruptReason(controller.signal.reason);
     await outputChain;
     if (outputError !== null) throw outputError;
 
@@ -333,15 +431,14 @@ export class PipelineExecutor {
     const { run } = active;
     const step = run.pipeline.steps[index]!;
     const stepRun = run.steps[index]!;
-    const verify = await this.verify(active, index);
 
     if (outcome.kind === "interrupted") {
-      // Interrupção pelo usuário e limite de tempo chegam em US3; o passo fica `interrupted`.
-      stepRun.interruptReason = "user";
-      if (verify.violations.length > 0) stepRun.errorMessage = violationMessage(verify);
-      else stepRun.commitSha = await active.git.commitAll(`WIP: passo ${step.name} interrompido`, run.id);
-      return this.applyStepEvent(active, index, "interrupt");
+      // Interromper, limite de tempo ou encerramento: o motivo vem do `signal.reason` (research R4).
+      const reason = active.lastAbortReason ?? active.pendingAbort ?? "user";
+      await this.closeInterrupted(active, index, reason);
+      return this.applyStepEvent(active, index, REASON_EVENT[reason]);
     }
+    const verify = await this.verify(active, index);
     if (verify.violations.length > 0) {
       await this.recordError(active, index, violationMessage(verify));
       return this.applyStepEvent(active, index, "ref_violation");
@@ -354,7 +451,12 @@ export class PipelineExecutor {
     if (!step.interactive) {
       stepRun.commitSha = await active.git.commitAll(`orchestrator: ${step.name} concluído`, run.id);
     }
-    return this.applyStepEvent(active, index, "agent_success");
+    const status = await this.applyStepEvent(active, index, "agent_success");
+    // Interrupção pedida enquanto o agente terminava: aplica-se à pausa recém-aberta.
+    if (status === "awaiting_input" && active.pendingAbort !== null) {
+      return this.interruptAwaiting(active, active.pendingAbort);
+    }
+    return status;
   }
 
   /** Aplica o evento ao passo e ao run; grava e emite, ou encerra se o run ficou terminal. */
@@ -498,6 +600,10 @@ function newStepRun(stepId: string): StepRun {
 
 function violationMessage(verify: VerifyResult): string {
   return `O passo alterou referências protegidas do Git, e nada foi commitado: ${verify.violations.join("; ")}.`;
+}
+
+function toInterruptReason(reason: unknown): InterruptReason {
+  return typeof reason === "string" && INTERRUPT_REASONS.has(reason) ? (reason as InterruptReason) : "user";
 }
 
 function errorText(error: unknown): string {

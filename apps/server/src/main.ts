@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import type { AgentRunner } from "./agent/agent-runner.js";
 import { ClaudeCliRunner } from "./agent/claude-cli-runner.js";
 import { PipelineExecutor } from "./execution/pipeline-executor.js";
+import { recoverInterruptedRuns } from "./execution/recovery.js";
 import { RunLock } from "./execution/run-lock.js";
 import { createApp } from "./http/app.js";
 import { isAllowedRequest } from "./http/origin-guard.js";
@@ -68,6 +69,11 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
   const runStore = new RunStore(dataDir);
   const settingsStore = new SettingsStore(dataDir);
   await pipelineStore.init();
+  // Runs que ficaram em andamento quando o processo morreu viram `interrupted` antes do listen (R8).
+  const recovered = await recoverInterruptedRuns(runStore);
+  if (recovered.length > 0) {
+    console.log(`Execuções interrompidas pelo encerramento anterior marcadas como interrompidas: ${recovered.join(", ")}`);
+  }
 
   let port = options.port ?? envPort();
   const guard = { getPort: () => port, devPorts: options.devPorts ?? envDevPorts() };
@@ -130,7 +136,12 @@ async function main(): Promise<void> {
     if (stopping) return;
     stopping = true;
     console.log(`${signal} recebido; encerrando...`);
-    running.close().then(
+    // Primeiro interrompe o run ativo (commit WIP e run.json gravado); só então fecha WS e HTTP.
+    running.executor
+      .shutdown()
+      .catch((error: unknown) => console.error("Falha ao interromper a execução ativa:", error))
+      .then(() => running.close())
+      .then(
       () => process.exit(0),
       (error: unknown) => {
         console.error("Falha ao encerrar:", error);

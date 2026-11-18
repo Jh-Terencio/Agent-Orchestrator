@@ -1,5 +1,5 @@
 import type { Step, StepRun } from "@orchestrator/shared";
-import { formatDuration, formatUsage, STEP_STATUS_LABELS } from "../format";
+import { formatDuration, formatUsage, INTERRUPT_REASON_LABELS, STEP_STATUS_LABELS } from "../format";
 
 export interface StepBoxProps {
   index: number;
@@ -35,6 +35,9 @@ export function StepBox({ index, step, stepRun, selected, onSelect }: StepBoxPro
           <code className="step-command">{step.command}</code>
         </span>
         <span className="step-status">{STEP_STATUS_LABELS[status]}</span>
+        {status === "interrupted" && stepRun?.interruptReason && (
+          <span className="step-interrupt-reason">{INTERRUPT_REASON_LABELS[stepRun.interruptReason]}</span>
+        )}
         {stepRun?.durationMs != null && <span className="step-duration">{formatDuration(stepRun.durationMs)}</span>}
         {usageText !== null ? (
           <span className="step-usage">{usageText}</span>
@@ -42,7 +45,9 @@ export function StepBox({ index, step, stepRun, selected, onSelect }: StepBoxPro
           settled && <span className="step-usage muted">consumo indisponível</span>
         )}
       </button>
-      {status === "failed" && stepRun?.errorMessage && <p className="error step-error">{stepRun.errorMessage}</p>}
+      {(status === "failed" || status === "interrupted") && stepRun?.errorMessage && (
+        <p className="error step-error">{stepRun.errorMessage}</p>
+      )}
     </li>
   );
 }

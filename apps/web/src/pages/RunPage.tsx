@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Pipeline, RepoInfo } from "@orchestrator/shared";
-import { ApiClientError, getActiveRun, listPipelines, startRun } from "../api/client";
+import { ApiClientError, getActiveRun, interrupt, listPipelines, startRun } from "../api/client";
 import { FeatureInput } from "../components/FeatureInput";
 import { InteractiveReply } from "../components/InteractiveReply";
 import { PipelineBoxes } from "../components/PipelineBoxes";
@@ -24,6 +24,13 @@ export function RunPage() {
   /** Esteira mostrada antes do envio (todos os passos "aguardando"). */
   const [previewPipeline, setPreviewPipeline] = useState<Pipeline | null>(null);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  /** `true` entre o clique em "Interromper" e o próximo `run.updated`. */
+  const [interrupting, setInterrupting] = useState(false);
+
+  // Cada nova versão do run (run.updated / run.finished) reabilita o botão "Interromper".
+  useEffect(() => {
+    setInterrupting(false);
+  }, [run]);
 
   useEffect(() => {
     let alive = true;
@@ -95,6 +102,18 @@ export function RunPage() {
     }
   };
 
+  const requestInterrupt = async (): Promise<void> => {
+    if (!run) return;
+    setInterrupting(true);
+    setError(null);
+    try {
+      await interrupt(run.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setInterrupting(false);
+    }
+  };
+
   const awaitingIndex = run ? run.steps.findIndex((step) => step.status === "awaiting_input") : -1;
   const awaitingStep = run && awaitingIndex >= 0 ? run.pipeline.steps[awaitingIndex] : undefined;
   const selectedStep = run && selectedIndex !== null ? run.pipeline.steps[selectedIndex] : undefined;
@@ -142,6 +161,20 @@ export function RunPage() {
 
       {run && (
         <>
+          {runActive && (
+            <div className="run-controls">
+              <button
+                type="button"
+                className="danger"
+                onClick={() => void requestInterrupt()}
+                disabled={interrupting}
+                aria-busy={interrupting}
+              >
+                Interromper
+              </button>
+            </div>
+          )}
+
           <PipelineBoxes
             steps={run.pipeline.steps}
             stepRuns={run.steps}

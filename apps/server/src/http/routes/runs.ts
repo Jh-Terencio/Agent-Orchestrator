@@ -58,5 +58,11 @@ export function runsRouter(executor: PipelineExecutor, pipelineStore: PipelineSt
     res.status(202).end();
   });
 
+  // Interromper (FR-018): 202; 409 INVALID_STATE se não estiver em running/awaiting_input; 404 se não existir.
+  router.post("/runs/:id/interrupt", async (req, res) => {
+    await executor.interrupt(req.params.id);
+    res.status(202).end();
+  });
+
   return router;
 }

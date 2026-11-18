@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createDefaultPipeline,
   type OutputEntry,
@@ -574,5 +574,286 @@ describe("PipelineExecutor (US2): saída em tempo real", () => {
     const stored = await runStore.readOutput(run.id, 0);
     expect(stored.at(-1)?.kind).toBe("error");
     expect(stored.at(-1)?.text).toContain("refs/tags/v-proibida");
+  });
+});
+
+// ------------------------------------------------------------------------------------------------
+// US3: interromper, limite de tempo e encerramento do servidor
+// ------------------------------------------------------------------------------------------------
+
+/** Agente que trabalha por muito tempo (só termina se abortado). */
+const LONG = 10 * 60 * 60_000;
+
+/**
+ * Espera a condição girando o laço de eventos com `setImmediate` (não falsificado): funciona com
+ * `vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })` sem avançar o relógio falso.
+ */
+async function until(check: () => boolean | Promise<boolean>, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error("tempo esgotado esperando a condição");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
+/** Gira o laço de eventos por um tempo real curto, para o executor reagir (ou não) ao relógio falso. */
+async function settle(ms = 150): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+const useFakeClock = (): void => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+};
+
+describe("PipelineExecutor (US3): interromper", () => {
+  afterEach(async () => {
+    await executor.shutdown();
+    vi.useRealTimers();
+  });
+
+  it("interrupt em running → passo interrupted (user), commit WIP, run interrupted, restantes waiting, lock liberado", async () => {
+    makeExecutor([{ sideEffect: writesFile, delayMs: LONG }]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const mainSha = await repo.git("rev-parse", "main");
+    const run = await start(pipeline);
+    await until(() => runner.invocations.length === 1);
+
+    await executor.interrupt(run.id);
+    await executor.whenIdle();
+
+    const done = await runStore.get(run.id);
+    expect(done.status).toBe("interrupted");
+    expect(done.finishedAt).not.toBeNull();
+    expect(done.steps[0]).toMatchObject({ status: "interrupted", interruptReason: "user" });
+    expect(done.steps[0]?.commitSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(done.steps[0]?.invocations.at(-1)?.outcome).toBe("interrupted");
+    expect(done.steps[1]?.status).toBe("waiting");
+    expect(await commitMessages()).toContain("WIP: passo Specify interrompido");
+    expect(await repo.git("rev-parse", "main")).toBe(mainSha);
+    expect(lock.activeRunId).toBeNull();
+    expect(executor.getActiveRun()).toBeNull();
+    expect(runner.invocations).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", run: { id: run.id, status: "interrupted" } });
+  });
+
+  it("interrupt em running sem alterações → nenhum commit", async () => {
+    makeExecutor([{ delayMs: LONG }]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await until(() => runner.invocations.length === 1);
+    await executor.interrupt(run.id);
+    await executor.whenIdle();
+    const done = await runStore.get(run.id);
+    expect(done.steps[0]).toMatchObject({ status: "interrupted", interruptReason: "user", commitSha: null });
+    expect(await commitMessages()).not.toContain("WIP: passo Specify interrompido");
+  });
+
+  it("interrupt em awaiting_input → interrupted com commit WIP, sem nova invocação", async () => {
+    makeExecutor();
+    const pipeline = twoStepPipeline([{ interactive: true }]);
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await executor.whenIdle();
+    expect(executor.getActiveRun()?.steps[0]?.status).toBe("awaiting_input");
+
+    await executor.interrupt(run.id);
+    await executor.whenIdle();
+
+    const done = await runStore.get(run.id);
+    expect(done.status).toBe("interrupted");
+    expect(done.steps[0]).toMatchObject({ status: "interrupted", interruptReason: "user" });
+    expect(done.steps[0]?.commitSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(done.steps[1]?.status).toBe("waiting");
+    expect(await commitMessages()).toContain("WIP: passo Specify interrompido");
+    expect(runner.invocations).toHaveLength(1);
+    expect(lock.activeRunId).toBeNull();
+  });
+
+  it("interrupt em run terminal → INVALID_STATE; em run inexistente → NOT_FOUND", async () => {
+    makeExecutor();
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await executor.whenIdle();
+    expect((await runStore.get(run.id)).status).toBe("completed");
+    await expectApiError(executor.interrupt(run.id), 409, "INVALID_STATE");
+    await expectApiError(executor.interrupt("33333333-3333-4333-8333-333333333333"), 404, "NOT_FOUND");
+  });
+
+  it("violação de refs num passo interrompido em running → continua interrupted, sem commit, errorMessage com a violação", async () => {
+    makeExecutor([
+      {
+        delayMs: LONG,
+        sideEffect: async (cwd) => {
+          await writeFile(join(cwd, "x.md"), "x\n");
+          await gitIn(cwd, "switch", "main");
+        },
+      },
+    ]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const mainSha = await repo.git("rev-parse", "main");
+    const run = await start(pipeline);
+    await until(() => runner.invocations.length === 1);
+    await executor.interrupt(run.id);
+    await executor.whenIdle();
+
+    const done = await runStore.get(run.id);
+    expect(done.status).toBe("interrupted");
+    expect(done.steps[0]).toMatchObject({ status: "interrupted", interruptReason: "user", commitSha: null });
+    expect(done.steps[0]?.errorMessage).toContain("refs/heads/main");
+    expect(await commitMessages()).not.toContain("WIP: passo Specify interrompido");
+    expect(await repo.git("rev-parse", "main")).toBe(mainSha);
+  });
+
+  it("violação de refs num passo interrompido em awaiting_input → continua interrupted, sem commit", async () => {
+    makeExecutor();
+    const pipeline = twoStepPipeline([{ interactive: true }]);
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await executor.whenIdle();
+    await repo.git("add", "-A");
+    await repo.git("stash");
+    await repo.git("switch", "main");
+
+    await executor.interrupt(run.id);
+    await executor.whenIdle();
+
+    const done = await runStore.get(run.id);
+    expect(done.status).toBe("interrupted");
+    expect(done.steps[0]).toMatchObject({ status: "interrupted", interruptReason: "user", commitSha: null });
+    expect(done.steps[0]?.errorMessage).toContain("refs/heads/main");
+    expect(lock.activeRunId).toBeNull();
+  });
+});
+
+describe("PipelineExecutor (US3): limite de tempo", () => {
+  afterEach(async () => {
+    await executor.shutdown();
+    vi.useRealTimers();
+  });
+
+  it("dispara exatamente em timeoutMinutes × 60 000 ms, com interruptReason timeout e commit WIP", async () => {
+    useFakeClock();
+    makeExecutor([{ sideEffect: writesFile, delayMs: LONG }]);
+    const pipeline = twoStepPipeline([{ timeoutMinutes: 5 }]);
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await until(() => runner.invocations.length === 1);
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000 - 1);
+    await settle();
+    expect(executor.getActiveRun()?.steps[0]?.status).toBe("running");
+
+    await vi.advanceTimersByTimeAsync(1);
+    await until(() => executor.getActiveRun() === null);
+    await executor.whenIdle();
+
+    const done = await runStore.get(run.id);
+    expect(done.status).toBe("interrupted");
+    expect(done.steps[0]).toMatchObject({ status: "interrupted", interruptReason: "timeout" });
+    expect(done.steps[0]?.commitSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(done.steps[1]?.status).toBe("waiting");
+    expect(runner.invocations).toHaveLength(1);
+  });
+
+  it("passo sem timeoutMinutes usa 30 min", async () => {
+    useFakeClock();
+    makeExecutor([{ delayMs: LONG }]);
+    const pipeline = twoStepPipeline();
+    expect(pipeline.steps[0]?.timeoutMinutes).toBeUndefined();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await until(() => runner.invocations.length === 1);
+
+    await vi.advanceTimersByTimeAsync(30 * 60_000 - 1);
+    await settle();
+    expect(executor.getActiveRun()?.steps[0]?.status).toBe("running");
+
+    await vi.advanceTimersByTimeAsync(1);
+    await until(() => executor.getActiveRun() === null);
+    expect((await runStore.get(run.id)).steps[0]?.interruptReason).toBe("timeout");
+  });
+
+  it("a pausa em awaiting_input não conta e cada reply recebe o limite completo", async () => {
+    useFakeClock();
+    makeExecutor([{ sideEffect: writesFile }, { delayMs: LONG }]);
+    const pipeline = twoStepPipeline([{ interactive: true, timeoutMinutes: 5 }]);
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await until(() => executor.getActiveRun()?.steps[0]?.status === "awaiting_input");
+
+    await vi.advanceTimersByTimeAsync(2 * 60 * 60_000);
+    await settle();
+    expect(executor.getActiveRun()?.steps[0]?.status).toBe("awaiting_input");
+
+    await executor.reply(run.id, "continue");
+    await until(() => runner.invocations.length === 2);
+    await vi.advanceTimersByTimeAsync(5 * 60_000 - 1);
+    await settle();
+    expect(executor.getActiveRun()?.steps[0]?.status).toBe("running");
+
+    await vi.advanceTimersByTimeAsync(1);
+    await until(() => executor.getActiveRun() === null);
+    const done = await runStore.get(run.id);
+    expect(done.steps[0]).toMatchObject({ status: "interrupted", interruptReason: "timeout" });
+  });
+
+  it("invocação que termina antes do limite cancela o timer", async () => {
+    useFakeClock();
+    makeExecutor([{ sideEffect: writesFile }]);
+    const pipeline = twoStepPipeline([{ interactive: true, timeoutMinutes: 1 }]);
+    await installCommands(repo, pipeline);
+    await start(pipeline);
+    await until(() => executor.getActiveRun()?.steps[0]?.status === "awaiting_input");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("PipelineExecutor (US3): shutdown", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("shutdown em running interrompe com server_shutdown, faz o commit WIP e persiste antes de resolver", async () => {
+    makeExecutor([{ sideEffect: writesFile, delayMs: LONG }]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await until(() => runner.invocations.length === 1);
+
+    await executor.shutdown();
+
+    const done = await runStore.get(run.id);
+    expect(done.status).toBe("interrupted");
+    expect(done.steps[0]).toMatchObject({ status: "interrupted", interruptReason: "server_shutdown" });
+    expect(done.steps[0]?.commitSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(await commitMessages()).toContain("WIP: passo Specify interrompido");
+    expect(lock.activeRunId).toBeNull();
+    expect(executor.getActiveRun()).toBeNull();
+  });
+
+  it("shutdown em awaiting_input → interrupted com server_shutdown", async () => {
+    makeExecutor();
+    const pipeline = twoStepPipeline([{ interactive: true }]);
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await executor.whenIdle();
+
+    await executor.shutdown();
+
+    const done = await runStore.get(run.id);
+    expect(done.status).toBe("interrupted");
+    expect(done.steps[0]).toMatchObject({ status: "interrupted", interruptReason: "server_shutdown" });
+    expect(done.steps[0]?.commitSha).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("shutdown sem run ativo resolve sem efeito", async () => {
+    makeExecutor();
+    await expect(executor.shutdown()).resolves.toBeUndefined();
+    expect(events).toHaveLength(0);
   });
 });

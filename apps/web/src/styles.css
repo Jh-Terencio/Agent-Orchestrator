@@ -425,3 +425,25 @@ pre.entry {
   color: var(--error);
   font-weight: 600;
 }
+
+/* US3: interromper */
+.run-controls {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0.5rem 0;
+}
+
+button.danger {
+  color: #fff;
+  background: var(--error);
+  border-color: var(--error);
+}
+
+button.danger:disabled {
+  opacity: 0.6;
+}
+
+.step-interrupt-reason {
+  font-size: 0.8rem;
+  color: var(--warn);
+}
