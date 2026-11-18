@@ -103,3 +103,179 @@ main {
 .muted {
   color: var(--muted);
 }
+
+/* US1: repositório, descrição, passos, resposta e resumo */
+:root {
+  --error: #c0392b;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --error: #ff7b6b;
+  }
+}
+
+.page > * + * {
+  margin-top: 1rem;
+}
+
+label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+
+input[type="text"],
+textarea {
+  font: inherit;
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+button {
+  font: inherit;
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+button.link {
+  border: none;
+  background: none;
+  padding: 0.1rem 0.3rem;
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.repo-picker form.row label {
+  margin: 0;
+}
+
+.repo-picker form.row input {
+  flex: 1;
+  min-width: 16rem;
+}
+
+.recent {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  margin-top: 0.4rem;
+  font-size: 0.9rem;
+}
+
+.feature-input .row,
+.interactive-reply .row {
+  margin-top: 0.5rem;
+}
+
+.ok {
+  color: var(--ok);
+}
+
+.warn {
+  color: var(--warn);
+}
+
+.error {
+  color: var(--error);
+}
+
+.problems {
+  color: var(--error);
+  margin: 0.4rem 0;
+}
+
+.steps {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.step {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.step-name {
+  font-weight: 600;
+}
+
+.step-status {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.step-running .step-status,
+.step-awaiting_input .step-status {
+  color: var(--accent);
+}
+
+.step-completed .step-status {
+  color: var(--ok);
+}
+
+.step-failed .step-status {
+  color: var(--error);
+}
+
+.step-interrupted .step-status {
+  color: var(--warn);
+}
+
+.interactive-reply,
+.run-summary {
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.run-summary p {
+  margin: 0.3rem 0;
+}
+
+.run-summary ul {
+  margin: 0.2rem 0 0.4rem;
+}
+
+.run-status-completed {
+  color: var(--ok);
+}
+
+.run-status-failed {
+  color: var(--error);
+}
+
+.run-status-interrupted {
+  color: var(--warn);
+}

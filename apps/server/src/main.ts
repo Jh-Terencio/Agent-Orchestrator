@@ -2,6 +2,9 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { pathToFileURL } from "node:url";
 import type { AgentRunner } from "./agent/agent-runner.js";
+import { ClaudeCliRunner } from "./agent/claude-cli-runner.js";
+import { PipelineExecutor } from "./execution/pipeline-executor.js";
+import { RunLock } from "./execution/run-lock.js";
 import { createApp } from "./http/app.js";
 import { isAllowedRequest } from "./http/origin-guard.js";
 import { ensureDataDirs, resolveDataDir } from "./storage/data-dir.js";
@@ -20,7 +23,7 @@ export interface StartServerOptions {
   port?: number;
   /** Padrão: `resolveDataDir()`. */
   dataDir?: string;
-  /** Runner do agente; o executor que o usa entra nas próximas fases. */
+  /** Runner do agente. Padrão: `ClaudeCliRunner` (a CLI `claude` real); os testes passam o fake. */
   agentRunner?: AgentRunner;
   devPorts?: readonly number[];
 }
@@ -32,7 +35,8 @@ export interface RunningServer {
   pipelineStore: PipelineStore;
   runStore: RunStore;
   settingsStore: SettingsStore;
-  agentRunner: AgentRunner | undefined;
+  agentRunner: AgentRunner;
+  executor: PipelineExecutor;
   close(): Promise<void>;
 }
 
@@ -68,12 +72,25 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
   let port = options.port ?? envPort();
   const guard = { getPort: () => port, devPorts: options.devPorts ?? envDevPorts() };
 
-  const app = createApp({ ...guard, pipelineStore, runStore, settingsStore });
+  const agentRunner = options.agentRunner ?? new ClaudeCliRunner();
+  // O hub depende do http.Server, que depende do app, que depende do executor: o executor
+  // recebe um encaminhador, e o hub é ligado logo abaixo.
+  let hubRef: EventHub | null = null;
+  const executor = new PipelineExecutor({
+    agentRunner,
+    runStore,
+    settingsStore,
+    eventHub: { broadcast: (event) => hubRef?.broadcast(event) },
+    lock: new RunLock(),
+  });
+
+  const app = createApp({ ...guard, pipelineStore, runStore, settingsStore, executor });
   const server = createServer(app);
   const hub = new EventHub(server, {
     isAllowed: (req) => isAllowedRequest(req, guard),
-    getActiveRun: () => null,
+    getActiveRun: () => executor.getActiveRun(),
   });
+  hubRef = hub;
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -91,7 +108,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     pipelineStore,
     runStore,
     settingsStore,
-    agentRunner: options.agentRunner,
+    agentRunner,
+    executor,
     async close() {
       await hub.close();
       server.closeAllConnections();

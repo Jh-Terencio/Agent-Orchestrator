@@ -1,0 +1,509 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  createDefaultPipeline,
+  type Pipeline,
+  type Run,
+  type ServerEvent,
+  type Usage,
+} from "@orchestrator/shared";
+import { buildRunBranchName } from "../../src/git/branch-name.js";
+import { ApiError } from "../../src/http/errors.js";
+import { PipelineExecutor } from "../../src/execution/pipeline-executor.js";
+import { RunLock } from "../../src/execution/run-lock.js";
+import { RunStore } from "../../src/storage/run-store.js";
+import { SettingsStore } from "../../src/storage/settings-store.js";
+import { FakeAgentRunner, type FakeScript } from "../fakes/fake-agent-runner.js";
+import { createTempRepo, gitIn, type TempRepo } from "../fakes/temp-repo.js";
+
+const NOW = "2026-11-17T12:00:00.000Z";
+const DESCRIPTION = "Adicionar login com e-mail";
+
+let repo: TempRepo;
+let dataDir: string;
+let runStore: RunStore;
+let settingsStore: SettingsStore;
+let events: ServerEvent[];
+let lock: RunLock;
+let runner: FakeAgentRunner;
+let executor: PipelineExecutor;
+let fileCounter = 0;
+
+/** Simula o agente escrevendo um arquivo novo no repositório. */
+const writesFile: NonNullable<FakeScript["sideEffect"]> = async (cwd) => {
+  fileCounter += 1;
+  await writeFile(join(cwd, `artefato-${fileCounter}.md`), `conteúdo ${fileCounter}\n`, "utf8");
+};
+
+const usage = (costUsd: number | null, extra: Partial<Usage> = {}): Usage => ({
+  inputTokens: 10,
+  outputTokens: 5,
+  cacheReadTokens: 0,
+  cacheCreationTokens: 0,
+  costUsd,
+  numTurns: 1,
+  ...extra,
+});
+
+function makeExecutor(scripts: FakeScript[] = [], fallback: FakeScript = { sideEffect: writesFile }, clock?: () => Date) {
+  runner = new FakeAgentRunner(scripts, fallback);
+  executor = new PipelineExecutor({
+    agentRunner: runner,
+    runStore,
+    settingsStore,
+    eventHub: { broadcast: (event) => events.push(event) },
+    lock,
+    ...(clock ? { clock } : {}),
+  });
+  return executor;
+}
+
+/** Instala as skills dos comandos no repositório (commitadas, para a árvore continuar limpa). */
+async function installCommands(target: TempRepo, pipeline: Pipeline): Promise<void> {
+  for (const step of pipeline.steps) {
+    const name = step.command.slice(1).split(" ")[0] ?? "";
+    await target.writeFile(`.claude/skills/${name}/SKILL.md`, `# ${name}\n`);
+  }
+  await target.git("add", "-A");
+  await target.git("commit", "-m", "instala skills");
+}
+
+function twoStepPipeline(overrides: Partial<Pipeline["steps"][number]>[] = []): Pipeline {
+  const base = createDefaultPipeline(NOW);
+  const steps = [
+    { ...base.steps[0]!, ...overrides[0] },
+    { ...base.steps[2]!, ...overrides[1] },
+  ];
+  return { ...base, id: "22222222-2222-4222-8222-222222222222", isDefault: false, name: "Duas etapas", steps };
+}
+
+async function start(pipeline: Pipeline, overrides: { expectedBranch?: string; description?: string } = {}): Promise<Run> {
+  return executor.start({
+    repoPath: repo.path,
+    pipeline,
+    description: overrides.description ?? DESCRIPTION,
+    expectedBranch: overrides.expectedBranch ?? "main",
+  });
+}
+
+async function finished(): Promise<Run> {
+  await executor.whenIdle();
+  const run = executor.getActiveRun() ?? (await runStore.get(lastRunId()));
+  return run;
+}
+
+function lastRunId(): string {
+  const last = [...events].reverse().find((event) => event.type === "run.updated" || event.type === "run.finished");
+  if (!last || !("run" in last)) throw new Error("nenhum run emitido");
+  return last.run.id;
+}
+
+async function expectApiError(promise: Promise<unknown>, status: number, code: string): Promise<ApiError> {
+  const error = await promise.then(
+    () => null,
+    (err: unknown) => err,
+  );
+  expect(error).toBeInstanceOf(ApiError);
+  expect((error as ApiError).status).toBe(status);
+  expect((error as ApiError).code).toBe(code);
+  return error as ApiError;
+}
+
+async function commitMessages(): Promise<string[]> {
+  return (await repo.git("log", "--format=%s")).split("\n");
+}
+
+beforeEach(async () => {
+  repo = await createTempRepo();
+  dataDir = await mkdtemp(join(tmpdir(), "orchestrator-executor-"));
+  runStore = new RunStore(dataDir);
+  settingsStore = new SettingsStore(dataDir);
+  events = [];
+  lock = new RunLock();
+  fileCounter = 0;
+});
+
+afterEach(async () => {
+  await executor?.whenIdle();
+  await repo.cleanup();
+  await rm(dataDir, { recursive: true, force: true });
+});
+
+describe("PipelineExecutor (US1): validação na partida", () => {
+  beforeEach(() => {
+    makeExecutor();
+  });
+
+  it("recusa repositório sujo com REPO_REJECTED, sem criar branch", async () => {
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    await repo.writeFile("sujo.txt", "x");
+    const error = await expectApiError(start(pipeline), 422, "REPO_REJECTED");
+    expect(error.details).toEqual({ problems: ["dirty_worktree"] });
+    expect(await repo.git("branch", "--list", "orchestrator/*")).toBe("");
+    expect(lock.activeRunId).toBeNull();
+  });
+
+  it("recusa merge em andamento", async () => {
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const head = await repo.git("rev-parse", "HEAD");
+    await writeFile(join(repo.path, ".git", "MERGE_HEAD"), `${head}\n`);
+    const error = await expectApiError(start(pipeline), 422, "REPO_REJECTED");
+    expect(error.details).toEqual({ problems: ["merge_or_rebase_in_progress"] });
+  });
+
+  it("recusa HEAD destacado", async () => {
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    await repo.git("switch", "--detach", "HEAD");
+    const error = await expectApiError(start(pipeline, { expectedBranch: "main" }), 422, "REPO_REJECTED");
+    expect(error.details).toEqual({ problems: ["detached_head"] });
+    expect(await repo.git("branch", "--list", "orchestrator/*")).toBe("");
+  });
+
+  it("expectedBranch diferente → BRANCH_CHANGED com details.currentBranch, sem branch e sem lock", async () => {
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const error = await expectApiError(start(pipeline, { expectedBranch: "develop" }), 409, "BRANCH_CHANGED");
+    expect(error.details).toEqual({ currentBranch: "main" });
+    expect(await repo.git("branch", "--list", "orchestrator/*")).toBe("");
+    expect(lock.activeRunId).toBeNull();
+  });
+
+  it("falha ao criar a branch → REPO_REJECTED e o lock é liberado", async () => {
+    const date = new Date("2026-11-17T12:00:00Z");
+    makeExecutor([], { sideEffect: writesFile }, () => date);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const taken = buildRunBranchName(DESCRIPTION, date);
+    await repo.git("branch", taken);
+
+    const error = await expectApiError(start(pipeline), 422, "REPO_REJECTED");
+    expect(error.message).toContain(taken);
+    expect(lock.activeRunId).toBeNull();
+    expect(await repo.git("branch", "--show-current")).toBe("main");
+
+    await repo.git("branch", "-D", taken);
+    const run = await start(pipeline);
+    expect(run.status).toBe("running");
+  });
+
+  it("segunda chamada a start com run ativo → RUN_ALREADY_ACTIVE", async () => {
+    const pipeline = twoStepPipeline([{}, { interactive: true }]);
+    await installCommands(repo, pipeline);
+    await start(pipeline);
+    await executor.whenIdle();
+    expect(executor.getActiveRun()?.status).toBe("awaiting_input");
+    await expectApiError(start(pipeline), 409, "RUN_ALREADY_ACTIVE");
+  });
+});
+
+describe("PipelineExecutor (US1): esteira padrão de ponta a ponta", () => {
+  it("roda os passos em ordem, com commits, pausas interativas, respostas e branch final", async () => {
+    makeExecutor();
+    const pipeline = createDefaultPipeline(NOW);
+    await installCommands(repo, pipeline);
+    const mainSha = await repo.git("rev-parse", "main");
+
+    const created = await start(pipeline);
+    expect(created.initialBranch).toMatch(/^orchestrator\/\d{8}-\d{6}-adicionar-login-com-e-mail$/);
+    expect(created.sourceBranch).toBe("main");
+    expect(created.refSnapshot).toContainEqual({ ref: "refs/heads/main", sha: mainSha });
+    expect(created.createdBranches).toEqual([created.initialBranch]);
+    expect(created.steps.every((step) => step.status === "waiting" || step.status === "running")).toBe(true);
+    expect(await repo.git("branch", "--show-current")).toBe(created.initialBranch);
+    expect((await settingsStore.get()).recentRepos[0]).toBe(created.repoPath);
+
+    // Specify (não interativo) conclui e Clarify (interativo) pausa
+    await executor.whenIdle();
+    let run = executor.getActiveRun()!;
+    expect(run.status).toBe("awaiting_input");
+    expect(run.steps.map((step) => step.status)).toEqual([
+      "completed",
+      "awaiting_input",
+      "waiting",
+      "waiting",
+      "waiting",
+    ]);
+    expect(run.steps[0]?.commitSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(run.steps[1]?.commitSha).toBeNull();
+    expect(await commitMessages()).toContain("orchestrator: Specify concluído");
+    const trailer = await gitIn(repo.path, "log", "-1", "--format=%(trailers:key=Orchestrator-Run,valueonly)", run.steps[0]!.commitSha!);
+    expect(trailer.trim()).toBe(run.id);
+
+    // prompts, modelos e sessões
+    expect(runner.invocations[0]).toMatchObject({
+      prompt: `/speckit-specify ${DESCRIPTION}`,
+      model: "sonnet",
+      resume: false,
+      interactive: false,
+      priorSessionCostUsd: 0,
+    });
+    expect(runner.invocations[1]).toMatchObject({ prompt: "/speckit-clarify", model: "sonnet", resume: false, interactive: true });
+    expect(runner.invocations[0]?.sessionId).not.toBe(runner.invocations[1]?.sessionId);
+    expect(run.steps[1]?.sessionId).toBe(runner.invocations[1]?.sessionId);
+
+    // resposta: mesma sessão, resume, registrada e de volta a awaiting_input
+    await executor.reply(run.id, "Use autenticação por e-mail e senha");
+    expect(executor.getActiveRun()?.steps[1]?.status).toBe("running");
+    await executor.whenIdle();
+    run = executor.getActiveRun()!;
+    expect(runner.invocations[2]).toMatchObject({
+      prompt: "Use autenticação por e-mail e senha",
+      resume: true,
+      sessionId: runner.invocations[1]?.sessionId,
+    });
+    expect(run.steps[1]?.status).toBe("awaiting_input");
+    expect(run.steps[1]?.replies.map((reply) => reply.text)).toEqual(["Use autenticação por e-mail e senha"]);
+    const clarifyOutput = await runStore.readOutput(run.id, 1);
+    expect(clarifyOutput).toContainEqual(
+      expect.objectContaining({ kind: "user_reply", text: "Use autenticação por e-mail e senha" }),
+    );
+
+    // avançar: commit do Clarify, Plan e Tasks rodam, Implement pausa
+    await executor.advance(run.id);
+    await executor.whenIdle();
+    run = executor.getActiveRun()!;
+    expect(run.steps.map((step) => step.status)).toEqual([
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+      "awaiting_input",
+    ]);
+    expect(runner.invocations.slice(3).map((inv) => [inv.prompt, inv.model])).toEqual([
+      ["/speckit-plan", "opus"],
+      ["/speckit-tasks", "sonnet"],
+      ["/speckit-implement", "sonnet"],
+    ]);
+
+    // avançar o último passo encerra a execução
+    await executor.advance(run.id);
+    await executor.whenIdle();
+    expect(executor.getActiveRun()).toBeNull();
+    const done = await runStore.get(run.id);
+    expect(done.status).toBe("completed");
+    expect(done.finalBranch).toBe(created.initialBranch);
+    expect(done.finishedAt).not.toBeNull();
+    expect(done.steps.every((step) => step.status === "completed")).toBe(true);
+    expect(await commitMessages()).toEqual(
+      expect.arrayContaining([
+        "orchestrator: Specify concluído",
+        "orchestrator: Clarify concluído",
+        "orchestrator: Plan concluído",
+        "orchestrator: Tasks concluído",
+        "orchestrator: Implement concluído",
+      ]),
+    );
+    expect(await repo.git("rev-parse", "main")).toBe(mainSha);
+    expect(lock.activeRunId).toBeNull();
+
+    // eventos: run.updated a cada mudança e run.finished no fim
+    expect(events.filter((event) => event.type === "run.updated").length).toBeGreaterThan(5);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", run: { id: run.id, status: "completed" } });
+  });
+
+  it("grava o prompt de cada Invocation e a entrada system 'Entrada: <prompt>' na invocação inicial", async () => {
+    makeExecutor();
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    const done = await finished();
+    expect(done.steps[0]?.invocations.map((inv) => inv.prompt)).toEqual([`/speckit-specify ${DESCRIPTION}`]);
+    expect(done.steps[1]?.invocations.map((inv) => inv.prompt)).toEqual(["/speckit-plan"]);
+    const output = await runStore.readOutput(run.id, 0);
+    expect(output[0]).toMatchObject({ seq: 1, kind: "system", text: `Entrada: /speckit-specify ${DESCRIPTION}` });
+  });
+
+  it("grava a saída do agente com seq monotônico", async () => {
+    makeExecutor([
+      {
+        outputs: [
+          { kind: "text", text: "olá" },
+          { kind: "tool_use", text: "Bash: ls" },
+        ],
+        sideEffect: writesFile,
+      },
+    ]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await finished();
+    const output = await runStore.readOutput(run.id, 0);
+    expect(output.map((entry) => [entry.seq, entry.kind])).toEqual([
+      [1, "system"],
+      [2, "text"],
+      [3, "tool_use"],
+    ]);
+  });
+});
+
+describe("PipelineExecutor (US1): consumo e duração", () => {
+  it("soma durationMs e usage das invocações sem contar o custo acumulado da sessão", async () => {
+    makeExecutor([
+      { sideEffect: writesFile, usage: usage(0.13), sessionCostUsd: 0.13, delayMs: 5 },
+      { sideEffect: writesFile, usage: usage(0.007), sessionCostUsd: 0.137, delayMs: 5 },
+    ]);
+    const pipeline = twoStepPipeline([{ interactive: true }]);
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await executor.whenIdle();
+    await executor.reply(run.id, "mais detalhes");
+    await executor.whenIdle();
+
+    expect(runner.invocations[0]?.priorSessionCostUsd).toBe(0);
+    expect(runner.invocations[1]?.priorSessionCostUsd).toBe(0.13);
+
+    const step = executor.getActiveRun()!.steps[0]!;
+    expect(step.invocations.map((inv) => inv.sessionCostUsd)).toEqual([0.13, 0.137]);
+    expect(step.usage?.costUsd).toBeCloseTo(0.137, 10);
+    expect(step.usage).toMatchObject({ inputTokens: 20, outputTokens: 10, numTurns: 2 });
+    expect(step.durationMs).toBe(step.invocations.reduce((sum, inv) => sum + inv.durationMs, 0));
+  });
+});
+
+describe("PipelineExecutor (US1): branches e verificação de refs", () => {
+  it("passo que cria e troca para uma branch nova → commit nela e ela entra em createdBranches", async () => {
+    makeExecutor([
+      {
+        sideEffect: async (cwd) => {
+          await gitIn(cwd, "switch", "-c", "001-login");
+          await writeFile(join(cwd, "spec.md"), "spec\n");
+        },
+      },
+    ]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    const done = await finished();
+    expect(done.status).toBe("completed");
+    expect(done.createdBranches).toEqual([run.initialBranch, "001-login"]);
+    expect(done.steps[0]?.branchAtEnd).toBe("001-login");
+    expect(await gitIn(repo.path, "log", "-1", "--format=%s", "001-login")).toBe("orchestrator: Plan concluído");
+    expect(done.finalBranch).toBe("001-login");
+  });
+
+  it("passo que termina em branch pré-existente → failed citando a branch, sem commit, restantes waiting", async () => {
+    makeExecutor([
+      {
+        sideEffect: async (cwd) => {
+          await writeFile(join(cwd, "x.md"), "x\n");
+          await gitIn(cwd, "switch", "main");
+        },
+      },
+    ]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const mainSha = await repo.git("rev-parse", "main");
+    await start(pipeline);
+    const done = await finished();
+    expect(done.status).toBe("failed");
+    expect(done.steps[0]?.status).toBe("failed");
+    expect(done.steps[0]?.errorMessage).toContain("refs/heads/main");
+    expect(done.steps[0]?.commitSha).toBeNull();
+    expect(done.steps[1]?.status).toBe("waiting");
+    expect(await repo.git("rev-parse", "main")).toBe(mainSha);
+    expect(runner.invocations).toHaveLength(1);
+    expect(lock.activeRunId).toBeNull();
+  });
+
+  it("tag criada pelo passo → failed sem commit", async () => {
+    makeExecutor([
+      {
+        sideEffect: async (cwd) => {
+          await writeFile(join(cwd, "x.md"), "x\n");
+          await gitIn(cwd, "tag", "v9.9");
+        },
+      },
+    ]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    await start(pipeline);
+    const done = await finished();
+    expect(done.status).toBe("failed");
+    expect(done.steps[0]?.errorMessage).toContain("refs/tags/v9.9");
+    expect(done.steps[0]?.commitSha).toBeNull();
+    expect(await commitMessages()).not.toContain("WIP: passo Specify com erro");
+  });
+
+  it("advance com violação de refs durante a pausa → failed, sem commit, run failed", async () => {
+    makeExecutor();
+    const pipeline = twoStepPipeline([{ interactive: true }]);
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await executor.whenIdle();
+    expect(executor.getActiveRun()?.steps[0]?.status).toBe("awaiting_input");
+
+    await repo.git("add", "-A");
+    await repo.git("stash");
+    await repo.git("switch", "main");
+    await executor.advance(run.id);
+    await executor.whenIdle();
+
+    const done = await runStore.get(run.id);
+    expect(done.status).toBe("failed");
+    expect(done.steps[0]?.status).toBe("failed");
+    expect(done.steps[0]?.errorMessage).toContain("refs/heads/main");
+    expect(done.steps[0]?.commitSha).toBeNull();
+    expect(done.steps[1]?.status).toBe("waiting");
+    expect(runner.invocations).toHaveLength(1);
+    expect(lock.activeRunId).toBeNull();
+  });
+});
+
+describe("PipelineExecutor (US1): erros", () => {
+  it("agente com error → failed com errorMessage, commit WIP com erro, run failed", async () => {
+    makeExecutor([{ sideEffect: writesFile, result: "error", errorMessage: "modelo indisponível" }]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    await start(pipeline);
+    const done = await finished();
+    expect(done.status).toBe("failed");
+    expect(done.steps[0]).toMatchObject({ status: "failed", errorMessage: "modelo indisponível" });
+    expect(done.steps[0]?.commitSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(await commitMessages()).toContain("WIP: passo Specify com erro");
+    expect(done.steps[1]?.status).toBe("waiting");
+  });
+
+  it("agente com error sem alterações → failed sem commit", async () => {
+    makeExecutor([{ result: "error", errorMessage: "falhou" }]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    await start(pipeline);
+    const done = await finished();
+    expect(done.steps[0]?.status).toBe("failed");
+    expect(done.steps[0]?.commitSha).toBeNull();
+  });
+
+  it("comando inexistente → failed sem invocar o agente", async () => {
+    makeExecutor();
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, { ...pipeline, steps: [pipeline.steps[1]!] });
+    await start(pipeline);
+    const done = await finished();
+    expect(done.status).toBe("failed");
+    expect(done.steps[0]?.status).toBe("failed");
+    expect(done.steps[0]?.errorMessage).toContain("/speckit-specify");
+    expect(runner.invocations).toHaveLength(0);
+  });
+
+  it("reply e advance fora de awaiting_input → INVALID_STATE", async () => {
+    makeExecutor([{ sideEffect: writesFile, delayMs: 200 }]);
+    const pipeline = twoStepPipeline();
+    await installCommands(repo, pipeline);
+    const run = await start(pipeline);
+    await expectApiError(executor.reply(run.id, "oi"), 409, "INVALID_STATE");
+    await expectApiError(executor.advance(run.id), 409, "INVALID_STATE");
+    await executor.whenIdle();
+    await expectApiError(executor.advance(run.id), 409, "INVALID_STATE");
+  });
+
+  it("reply e advance em execução inexistente → NOT_FOUND", async () => {
+    makeExecutor();
+    await expectApiError(executor.reply("33333333-3333-4333-8333-333333333333", "oi"), 404, "NOT_FOUND");
+    await expectApiError(executor.advance("33333333-3333-4333-8333-333333333333"), 404, "NOT_FOUND");
+  });
+});
